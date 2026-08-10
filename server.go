@@ -22,19 +22,33 @@ import (
 	"github.com/thanhminhmr/go-exception"
 )
 
-// ServerConfig holds the configuration for an HTTP server. Field tags are
-// honored by github.com/go-viper/mapstructure and github.com/go-playground/validator.
+// ServerConfig configures the [http.Server] registered by [NewServer]. Timeout
+// values are in seconds. [NewServer] does not apply or validate the
+// configuration tags.
 type ServerConfig struct {
-	Port              uint16 `cfg:"port" validate:"required" default:"8080"`
-	ReadHeaderTimeout int    `cfg:"read_header_timeout" validate:"min=1,max=60" default:"5"`
-	IdleTimeout       int    `cfg:"idle_timeout" validate:"min=1,max=3600" default:"60"`
-	MaxHeaderBytes    int    `cfg:"max_header_bytes" validate:"min=0,max=65536" default:"4096"`
-	ShutdownOnError   bool   `cfg:"shutdown_on_error" default:"true"`
+	// Port is the TCP port to listen on all interfaces.
+	Port uint16 `cfg:"port" validate:"required" default:"8080"`
+
+	// ReadHeaderTimeout limits time spent reading request headers, in seconds.
+	ReadHeaderTimeout int `cfg:"read_header_timeout" validate:"min=1,max=60" default:"5"`
+
+	// IdleTimeout limits idle keep-alive time, in seconds.
+	IdleTimeout int `cfg:"idle_timeout" validate:"min=1,max=3600" default:"60"`
+
+	// MaxHeaderBytes limits request header size in bytes.
+	MaxHeaderBytes int `cfg:"max_header_bytes" validate:"min=0,max=65536" default:"4096"`
+
+	// ShutdownOnError cancels the application when serving fails unexpectedly.
+	ShutdownOnError bool `cfg:"shutdown_on_error" default:"true"`
 }
 
-// NewServer creates a new HTTP server from config and returns its router for
-// route registration. The server is started and shut down automatically by the
-// application lifecycle. A default request logger middleware is installed.
+// NewServer creates a [chi.Mux], installs request logging and panic recovery,
+// and registers an [http.Server] with the [ctrl] lifecycle.
+//
+// The server listens on ":<config.Port>" when the lifecycle starts and shuts
+// down during cleanup. The config must already be defaulted and validated, and
+// should not be modified after this call. If serving fails unexpectedly,
+// ShutdownOnError controls whether the application lifecycle is canceled.
 func NewServer(config *ServerConfig) *chi.Mux {
 	// create route
 	router := chi.NewRouter()

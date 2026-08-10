@@ -17,13 +17,11 @@ import (
 	"github.com/thanhminhmr/go-exception"
 )
 
-// Context is passed to a [RequestHandler] or [MiddlewareHandler] and carries the
-// request-scoped context along with the response state. It implements
-// [context.Context] by delegating to the underlying [*http.Request] context.
+// Context carries the request context and the response being built by parser
+// handlers. It implements [context.Context] by delegating to the HTTP request.
 //
-// Build a response with [Context.NewResponse], then use the methods on the
-// returned [Response] (such as [Response.JsonBody] or [Response.Cookie]) to
-// configure it. The framework writes the response after the handler returns.
+// Context values are created by [RequestParser] and [MiddlewareParser]. The zero
+// value is invalid, and a Context must not be copied.
 type Context struct {
 	_ common.NoCopy
 
@@ -31,137 +29,143 @@ type Context struct {
 	writer  http.ResponseWriter
 
 	// response
-	status int
-	body   any
+	status     int
+	body       any
+	marshaller uint
 }
 
-func (c *Context) Deadline() (deadline time.Time, ok bool) { return c.request.Context().Deadline() }
-func (c *Context) Done() <-chan struct{}                   { return c.request.Context().Done() }
-func (c *Context) Err() error                              { return c.request.Context().Err() }
-func (c *Context) Value(key any) any                       { return c.request.Context().Value(key) }
-func (c *Context) Response() *Response                     { return &Response{ctx: c} }
+const (
+	marshallerIsDirect uint = iota
+	marshallerIsJson
+)
 
-// NewResponse starts building a [Response] with the given HTTP status code.
+// Deadline delegates to the HTTP request context.
+func (c *Context) Deadline() (deadline time.Time, ok bool) { return c.request.Context().Deadline() }
+
+// Done delegates to the HTTP request context.
+func (c *Context) Done() <-chan struct{} { return c.request.Context().Done() }
+
+// Err delegates to the HTTP request context.
+func (c *Context) Err() error { return c.request.Context().Err() }
+
+// Value delegates to the HTTP request context.
+func (c *Context) Value(key any) any { return c.request.Context().Value(key) }
+
+// Response returns a handle to the current response without changing it.
+// Its status is zero until [Context.NewResponse] is called.
+func (c *Context) Response() *Response { return &Response{ctx: c} }
+
+// NewResponse starts a new response with status and returns its handle.
+// It clears the previous body and all response headers. The response is written
+// only after the outermost parser returns.
+//
+// NewResponse panics unless status is between 100 and 599.
 func (c *Context) NewResponse(status int) Response {
 	if status < 100 || status > 599 {
 		panic("BUG: invalid status")
 	}
-	c.status = status
+	c.status, c.body, c.marshaller = status, nil, marshallerIsDirect
 	clear(c.writer.Header())
 	return Response{ctx: c}
 }
 
-// Response represents an HTTP response returned by a [RequestHandler]. Create
-// one with [Context.NewResponse], then chain methods such as [Response.JsonBody]
-// or [Response.Cookie] to configure it. The framework writes the response to
-// the client after the handler returns.
+// Response is a handle to response state owned by a [Context]. Copies share the
+// same state. The zero value is invalid.
 type Response struct{ ctx *Context }
 
-// Status returns the HTTP status code of the response.
-func (r Response) Status() int {
-	return r.ctx.status
-}
+// Status returns the configured HTTP status, or zero before [Context.NewResponse].
+func (r Response) Status() int { return r.ctx.status }
 
-// Header returns the response header map. Headers set here are sent with the
-// response. Mutations affect the response directly.
-func (r Response) Header() http.Header {
-	return r.ctx.writer.Header()
-}
+// Header returns the live response header map.
+// A later [Context.NewResponse] call clears it.
+func (r Response) Header() http.Header { return r.ctx.writer.Header() }
 
-func (r Response) Body() any {
-	return r.ctx.body
-}
+// Body returns the configured body value, or nil if no body is set.
+func (r Response) Body() any { return r.ctx.body }
 
-// Cookie adds a Set-Cookie header to the response.
-func (r *Response) Cookie(cookie http.Cookie) {
+// Cookie appends a Set-Cookie header for cookie to the response.
+func (r Response) Cookie(cookie http.Cookie) {
 	r.Header().Add("Set-Cookie", cookie.String())
 }
 
-// BytesBody sets the response body to body, written verbatim with no
-// Content-Type.
+// BytesBody sets a raw byte body without setting Content-Type.
 func (r Response) BytesBody(body []byte) {
-	r.ctx.body = body
+	r.ctx.body, r.ctx.marshaller = body, marshallerIsDirect
 }
 
-// StringBody sets the response body to body, written verbatim with no
-// Content-Type.
+// StringBody sets a raw string body without setting Content-Type.
 func (r Response) StringBody(body string) {
-	r.ctx.body = body
+	r.ctx.body, r.ctx.marshaller = body, marshallerIsDirect
 }
 
-// StreamBody sets the response body to a function that writes content directly
-// to the [io.Writer]. The status code is written before body is invoked. No
-// Content-Type is set.
+// StreamBody sets a body writer without setting Content-Type. The status is
+// committed before body runs, so an error from body can be logged but cannot
+// change the HTTP response status.
 func (r Response) StreamBody(body func(io.Writer) error) {
-	r.ctx.body = body
+	r.ctx.body, r.ctx.marshaller = body, marshallerIsDirect
 }
 
-// PlainTextBody sets the response body to body with Content-Type
-// "text/plain; charset=utf-8".
+// PlainTextBody sets body with Content-Type "text/plain; charset=utf-8".
 func (r Response) PlainTextBody(body string) {
 	r.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	r.ctx.body = body
+	r.ctx.body, r.ctx.marshaller = body, marshallerIsDirect
 }
 
-// OctetsBody sets the response body to body with Content-Type
-// "application/octet-stream".
+// OctetsBody sets body with Content-Type "application/octet-stream".
 func (r Response) OctetsBody(body []byte) {
 	r.Header().Set("Content-Type", "application/octet-stream")
-	r.ctx.body = body
+	r.ctx.body, r.ctx.marshaller = body, marshallerIsDirect
 }
 
-// JsonBody sets the response body to the JSON encoding of body with
-// Content-Type "application/json; charset=utf-8".
+// JsonBody stores body for JSON marshaling when the response is written.
+// Successful marshaling sets Content-Type to "application/json; charset=utf-8".
+// A marshal failure writes 500 Internal Server Error with an empty body.
 func (r Response) JsonBody(body any) {
-	r.Header().Set("Content-Type", "application/json; charset=utf-8")
-	r.ctx.body = jsonBody{body: body}
+	r.ctx.body, r.ctx.marshaller = body, marshallerIsJson
 }
 
-// MarshalZerologObject implements [zerolog.LogObjectMarshaler] so a Response
-// can be embedded in structured log entries.
+// MarshalZerologObject implements [zerolog.LogObjectMarshaler] for the
+// configured status, headers, and body.
 func (r Response) MarshalZerologObject(e *zerolog.Event) {
 	e.Int("status", r.ctx.status)
 	if header := r.ctx.writer.Header(); len(header) > 0 {
 		e.Any("header", header)
 	}
 	if r.ctx.body != nil {
-		switch body := r.ctx.body.(type) {
-		case jsonBody:
-			e.Any("body", body.body)
-		default:
-			e.Any("body", r.ctx.body)
-		}
+		e.Any("body", r.ctx.body)
 	}
 }
 
-type jsonBody = struct{ body any }
-
 func (c *Context) writeResponse() error {
-	switch body := c.body.(type) {
-	case nil:
-		c.writer.WriteHeader(c.status)
-		return nil
-	case []byte:
-		c.writer.WriteHeader(c.status)
-		_, err := c.writer.Write(body)
-		return err
-	case string:
-		c.writer.WriteHeader(c.status)
-		_, err := c.writer.Write(unsafeStringToBytes(body))
-		return err
-	case func(io.Writer) error:
-		c.writer.WriteHeader(c.status)
-		return body(c.writer)
-	case jsonBody:
-		data, err := json.Marshal(body.body)
+	switch c.marshaller {
+	case marshallerIsJson:
+		data, err := json.Marshal(c.body)
 		if err == nil {
+			c.writer.Header().Set("Content-Type", "application/json; charset=utf-8")
 			c.writer.WriteHeader(c.status)
 			_, err = c.writer.Write(data)
 		} else {
 			c.writer.WriteHeader(http.StatusInternalServerError)
 		}
 		return err
+	default:
+		switch body := c.body.(type) {
+		case nil:
+			c.writer.WriteHeader(c.status)
+			return nil
+		case []byte:
+			c.writer.WriteHeader(c.status)
+			_, err := c.writer.Write(body)
+			return err
+		case string:
+			c.writer.WriteHeader(c.status)
+			_, err := c.writer.Write(unsafeStringToBytes(body))
+			return err
+		case func(io.Writer) error:
+			c.writer.WriteHeader(c.status)
+			return body(c.writer)
+		}
+		c.writer.WriteHeader(http.StatusInternalServerError)
+		return exception.String("Response: unsupported body type")
 	}
-	c.writer.WriteHeader(http.StatusInternalServerError)
-	return exception.String("Response: unsupported body type")
 }

@@ -354,7 +354,7 @@ func TestBodyTag_Basic_BindsRawBody(t *testing.T) {
 }
 
 type bodyWithContentTypesStruct struct {
-	Body io.ReadCloser `body:"text/plain;application/xml"`
+	Body io.ReadCloser `body:"text/plain application/xml"`
 }
 
 func TestBodyTag_WithContentTypes_AcceptsMatching(t *testing.T) {
@@ -473,6 +473,14 @@ func TestJsonTag_PATCH_ParsesBody(t *testing.T) {
 	assert.Equal(t, 35, captured.request.Age, "Age")
 }
 
+func TestJsonTag_DELETE_ParsesBody(t *testing.T) {
+	captured, rec := doRequest[jsonSimpleStruct](t, captureHandler[jsonSimpleStruct],
+		http.MethodDelete, "/", withJSONBody(map[string]any{"name": "delete-data", "age": 25}))
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "delete-data", captured.request.Name, "Name")
+	assert.Equal(t, 25, captured.request.Age, "Age")
+}
+
 func TestBodyTag_PUT_BindsRawBody(t *testing.T) {
 	captured, rec := doRequest[bodyStruct](t, captureHandler[bodyStruct],
 		http.MethodPut, "/", withRawBody("text/plain", []byte("put body")))
@@ -489,25 +497,12 @@ func TestBodyTag_PATCH_BindsRawBody(t *testing.T) {
 	assert.Equal(t, "patch body", string(data), "Body")
 }
 
-type deleteBodyStruct struct {
-	Name string        `json:"name"`
-	Body io.ReadCloser `body:""`
-}
-
-func TestMethod_DELETE_SkipsBodyParsing(t *testing.T) {
-	captured, rec := doRequest[deleteBodyStruct](t, captureHandler[deleteBodyStruct],
-		http.MethodDelete, "/", withJSONBody(map[string]any{"name": "should-not-parse"}))
+func TestBodyTag_DELETE_BindsRawBody(t *testing.T) {
+	captured, rec := doRequest[bodyStruct](t, captureHandler[bodyStruct],
+		http.MethodDelete, "/", withRawBody("text/plain", []byte("delete body")))
 	assert.Equal(t, http.StatusOK, rec.Code)
-	assert.Equal(t, "", captured.request.Name, "Name should be zero value")
-	assert.Nil(t, captured.request.Body, "Body should be nil")
-}
-
-func TestMethod_HEAD_SkipsBodyParsing(t *testing.T) {
-	captured, rec := doRequest[deleteBodyStruct](t, captureHandler[deleteBodyStruct],
-		http.MethodHead, "/", withJSONBody(map[string]any{"name": "should-not-parse"}))
-	assert.Equal(t, http.StatusOK, rec.Code)
-	assert.Equal(t, "", captured.request.Name, "Name should be zero value")
-	assert.Nil(t, captured.request.Body, "Body should be nil")
+	data, _ := io.ReadAll(captured.request.Body)
+	assert.Equal(t, "delete body", string(data), "Body")
 }
 
 // ============ body tag content-length zero ============

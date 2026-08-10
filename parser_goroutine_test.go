@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // ============ Goroutine: body close cancels in-flight reader ============
@@ -190,9 +191,9 @@ func TestGoroutine_BindFullTextBody_ContextCancel_BodyClose_KillsBinder(t *testi
 
 // ============ Binder goroutine panic recovery ============
 //
-// When the binder goroutine panics (e.g. a user's UnmarshalText panics),
-// the defer exception.Recover inside the goroutine catches it and returns
-// 500 Internal Server Error instead of crashing the process.
+// When the binder goroutine panics (e.g. a user's UnmarshalText panics), the
+// defer exception.Recover inside the goroutine catches it and the parent
+// goroutine will re-panic if not timeout.
 
 type panicTextType string
 
@@ -200,18 +201,17 @@ func (p *panicTextType) UnmarshalText([]byte) error {
 	panic("coverage: binder panic")
 }
 
-func TestGoroutine_BinderPanic_Recovered(t *testing.T) {
-	type Req struct {
-		Value panicTextType `form:"value"`
-	}
-	handler := RequestParser(func(_ *Context, _ Req) {})
-	rec := httptest.NewRecorder()
-	req, _ := http.NewRequest(http.MethodPost, "/",
-		strings.NewReader("value=hello"))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded; charset=utf-8")
-	req.ContentLength = int64(len("value=hello"))
-	handler.ServeHTTP(rec, req)
-	// The panic in the binder goroutine should be caught by exception.Recover
-	// and returned as 500 Internal Server Error.
-	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+func TestGoroutine_BinderPanic(t *testing.T) {
+	require.Panics(t, func() {
+		type Req struct {
+			Value panicTextType `form:"value"`
+		}
+		handler := RequestParser(func(_ *Context, _ Req) {})
+		rec := httptest.NewRecorder()
+		req, _ := http.NewRequest(http.MethodPost, "/",
+			strings.NewReader("value=hello"))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded; charset=utf-8")
+		req.ContentLength = int64(len("value=hello"))
+		handler.ServeHTTP(rec, req)
+	})
 }

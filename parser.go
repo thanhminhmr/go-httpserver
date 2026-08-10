@@ -26,16 +26,21 @@ import (
 	"github.com/thanhminhmr/go-exception"
 )
 
-// RequestHandler is invoked by [RequestParser] after the request has been parsed
-// and validated. It receives the request [Context] and the populated Request
-// value. Use [Context.NewResponse] to build the response; if the handler returns
-// without writing a response, the server responds with a 500 Internal Server
-// Error.
+// RequestHandler handles a parsed and validated request. The handler builds its
+// response through ctx, usually with [Context.NewResponse].
 type RequestHandler[Request any] = func(ctx *Context, request Request)
 
-// RequestParser returns an [http.HandlerFunc] that binds, validates, and
-// dispatches an incoming request to handler. See the package documentation for
-// the supported struct tags and binding rules.
+// RequestParser converts a typed [RequestHandler] into an [http.HandlerFunc].
+//
+// Request must be a non-pointer struct. Its defaults and binding-tag layout are
+// checked when RequestParser is called; invalid definitions panic. Each request
+// gets a fresh Request value which is defaulted, bound, validated, then passed
+// to handler.
+//
+// Parse and validation failures return an empty HTTP error response without
+// calling handler. If no parser handler configures a response, the outermost
+// parser returns 500 Internal Server Error. Handler panics are not recovered;
+// [NewServer] installs recovery middleware for that purpose.
 func RequestParser[Request any](handler RequestHandler[Request]) http.HandlerFunc {
 	tags := createTags(reflect.TypeFor[Request]())
 	return func(writer http.ResponseWriter, request *http.Request) {
@@ -44,20 +49,29 @@ func RequestParser[Request any](handler RequestHandler[Request]) http.HandlerFun
 	}
 }
 
-// MiddlewareHandler is like [RequestHandler], but for middleware: after binding
-// and validation it calls next, forwarding the parsed [Context].
-type MiddlewareHandler[Request any] = func(ctx *Context, request Request, next func(ctx *Context))
+// MiddlewareHandler handles a parsed request around the next handler. Call next
+// to continue the chain; parser middleware in the same chain shares ctx.
+type MiddlewareHandler[Request any] = func(ctx *Context, request Request, next func())
 
-// MiddlewareParser returns a [Middleware] that binds and validates the request,
-// then invokes handler with the bound Context. See the package documentation for
-// the supported struct tags and binding rules.
+// MiddlewareParser converts a typed [MiddlewareHandler] into [Middleware].
+// Request parsing and validation follow the same rules as [RequestParser].
+//
+// Parser middleware shares one [Context] with downstream parser handlers. The
+// request body is not buffered or rewound, so a body consumed by one parser
+// cannot be parsed again downstream. Direct writes by ordinary net/http handlers
+// bypass the shared response state.
+//
+// A parse or validation failure stops the chain and writes the error response
+// immediately. Otherwise, the outermost parser writes the configured response
+// after the chain returns.
 func MiddlewareParser[Request any](handler MiddlewareHandler[Request]) Middleware {
 	tags := createTags(reflect.TypeFor[Request]())
 	return func(next http.Handler) http.Handler {
-		nextFunc := func(ctx *Context) { next.ServeHTTP(ctx.writer, ctx.request) }
 		return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 			var parsed Request
-			requestHandler(writer, request, &tags, &parsed, func(ctx *Context) { handler(ctx, parsed, nextFunc) })
+			requestHandler(writer, request, &tags, &parsed, func(ctx *Context) {
+				handler(ctx, parsed, func() { next.ServeHTTP(ctx.writer, ctx.request) })
+			})
 		})
 	}
 }
@@ -323,7 +337,7 @@ func (tags *requestTags) checkRecursively(requestType reflect.Type, fieldIndex [
 			tags.flags = tags.flags | tagBody
 			tags.bodyFieldIndex = append(append([]int(nil), fieldIndex...), field.Index...)
 			if value != "" {
-				tags.bodyContentTypes = strings.Split(value, ";")
+				tags.bodyContentTypes = strings.Fields(value)
 			}
 		}
 	}
@@ -365,7 +379,7 @@ func (tags *requestTags) parse(request *http.Request, parsed reflect.Value) (sta
 	}
 	// parse and bind body
 	switch request.Method {
-	case http.MethodPost, http.MethodPut, http.MethodPatch:
+	case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
 		// check for empty request
 		if request.ContentLength == 0 {
 			return
@@ -414,22 +428,24 @@ func bindFullTextBody(request *http.Request, contentTypeParameters map[string]st
 			exception.String("HttpServer: cannot determine body encoding").AddCause(err)
 	} else {
 		type resultValue struct {
-			status int
-			err    error
+			status    int
+			err       error
+			recovered exception.Exception
 		}
 		done := make(chan resultValue, 1)
 		// run the binder
 		go func(binder func(reader io.Reader, parsed reflect.Value) (int, error), done chan<- resultValue) {
-			defer exception.Recover(func(recovered exception.Exception) {
-				done <- resultValue{http.StatusInternalServerError,
-					exception.String("HttpServer: Bind body panicked").SetRecovered(recovered)}
-			})
+			defer exception.Recover(func(recovered exception.Exception) { done <- resultValue{recovered: recovered} })
 			status, err := binder(reader, parsed)
-			done <- resultValue{status, err}
+			done <- resultValue{status: status, err: err}
 		}(binder, done)
 		// set time limit for binder
 		select {
 		case result := <-done:
+			// re-panic recovered value
+			if result.recovered != nil {
+				panic(result.recovered)
+			}
 			return result.status, result.err
 		case <-request.Context().Done():
 			return http.StatusRequestTimeout,
@@ -537,6 +553,10 @@ func (tags *requestTags) bindJson(reader io.Reader, parsed reflect.Value) (int, 
 	decoder := json.NewDecoder(reader)
 	decoder.UseNumber()
 	if err := decoder.Decode(target); err != nil {
+		return http.StatusBadRequest, exception.String("HttpServer: Decode json body failed").AddCause(err)
+	}
+	// check for trailing data
+	if count, err := io.CopyN(io.Discard, reader, 1); count > 0 || err != nil && err != io.EOF {
 		return http.StatusBadRequest, exception.String("HttpServer: Decode json body failed").AddCause(err)
 	}
 	// bind json body
