@@ -290,14 +290,14 @@ type defaultSliceStruct struct {
 func TestDefaultTag_NoAliasing_BetweenRequests(t *testing.T) {
 	var secondRequestItems sliceDefaultType
 	callCount := 0
-	handler := RequestParser(func(ctx Context, req defaultSliceStruct) *Response {
+	handler := RequestParser(func(ctx *Context, req defaultSliceStruct) {
 		callCount++
 		if callCount == 1 {
 			req.Items[0] = "MUTATED"
 		} else {
 			secondRequestItems = req.Items
 		}
-		return ctx.Response(http.StatusOK)
+		ctx.NewResponse(http.StatusOK)
 	})
 
 	req1, _ := http.NewRequest(http.MethodGet, "/", nil)

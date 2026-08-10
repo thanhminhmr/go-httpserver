@@ -27,14 +27,14 @@ import (
 type multipartReader = multipart.Reader
 
 type capturedRequest[T any] struct {
-	ctx     Context
+	ctx     *Context
 	request T
 }
 
 // captureHandler is a RequestHandler that returns http.StatusOK. When used with
 // doRequest, the request is captured automatically by doRequest's wrapper.
-func captureHandler[T any](ctx Context, _ T) *Response {
-	return ctx.Response(http.StatusOK)
+func captureHandler[T any](ctx *Context, _ T) {
+	ctx.NewResponse(http.StatusOK)
 }
 
 type RequestSetter func(*http.Request)
@@ -49,10 +49,10 @@ func doRequest[T any](t *testing.T, handler RequestHandler[T], method, target st
 		setter(req)
 	}
 	captured := &capturedRequest[T]{}
-	wrappedHandler := RequestParser(func(ctx Context, req T) *Response {
+	wrappedHandler := RequestParser(func(ctx *Context, req T) {
 		captured.ctx = ctx
 		captured.request = req
-		return handler(ctx, req)
+		handler(ctx, req)
 	})
 	rec := httptest.NewRecorder()
 	wrappedHandler.ServeHTTP(rec, req)
@@ -70,10 +70,10 @@ func doChiRequest[T any](t *testing.T, method, pattern, target string, handler R
 	}
 	captured := &capturedRequest[T]{}
 	router := chi.NewRouter()
-	router.MethodFunc(method, pattern, RequestParser(func(ctx Context, req T) *Response {
+	router.MethodFunc(method, pattern, RequestParser(func(ctx *Context, req T) {
 		captured.ctx = ctx
 		captured.request = req
-		return handler(ctx, req)
+		handler(ctx, req)
 	}))
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)

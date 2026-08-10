@@ -28,8 +28,8 @@ github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu
 github.com/stretchr/testify v1.11.1/go.mod h1:wZwfW3scLgRK+23gO65QZefKpKQRnfz6sD981Nm4B6U=
 github.com/thanhminhmr/go-common v0.0.54 h1:E3Pr4PFvpEUqKG3THh9yu1CsBLVnREo547agUl6LvSI=
 github.com/thanhminhmr/go-common v0.0.54/go.mod h1:dBwjWdt4Yop5Vq02i5blk2uB7TEMoaJm4ccHsPZ0x/8=
-github.com/thanhminhmr/go-exception v0.0.16 h1:EarQhoAFB4jbLxD8MxIXY+aB973I7Rg21E0QanlC20A=
-github.com/thanhminhmr/go-exception v0.0.16/go.mod h1:WKYWriLXOpRjRdpknWeLReBKrbd/YG0K261CdsL0r2c=
+github.com/thanhminhmr/go-exception v0.0.17 h1:/lSKDI8ysLdQm+mGneY5FbRcx6mCVwWObV8rRLLIQhQ=
+github.com/thanhminhmr/go-exception v0.0.17/go.mod h1:u4cj+ffL5emOuRfhkVZkri3bYAXPdJvcdCyOG8q2ips=
 golang.org/x/crypto v0.54.0 h1:YLIA59K4fiNzHzjnZt2tUJQjQtUWfWbeHBqKtk3eScw=
 golang.org/x/crypto v0.54.0/go.mod h1:KWL8ny2AZdGR2cWmzeHrp2azQPGogOv+HeQaVEXC2dk=
 golang.org/x/net v0.57.0 h1:K5+3DljvIuDG9/Jv9rvyMywYNFCQ9RSUY6OOTTkT+tE=

@@ -23,8 +23,8 @@ import (
 func TestResponse_FluentBuilder(t *testing.T) {
 	type Req struct{}
 	t.Run("status_and_body", func(t *testing.T) {
-		handler := RequestParser(func(ctx Context, _ Req) *Response {
-			return ctx.Response(http.StatusCreated).PlainTextBody("created")
+		handler := RequestParser(func(ctx *Context, _ Req) {
+			ctx.NewResponse(http.StatusCreated).PlainTextBody("created")
 		})
 		req, _ := http.NewRequest(http.MethodGet, "/", nil)
 		rec := httptest.NewRecorder()
@@ -36,8 +36,8 @@ func TestResponse_FluentBuilder(t *testing.T) {
 		type Data struct {
 			Name string `json:"name"`
 		}
-		handler := RequestParser(func(ctx Context, _ Req) *Response {
-			return ctx.Response(http.StatusOK).JsonBody(Data{Name: "alice"})
+		handler := RequestParser(func(ctx *Context, _ Req) {
+			ctx.NewResponse(http.StatusOK).JsonBody(Data{Name: "alice"})
 		})
 		req, _ := http.NewRequest(http.MethodGet, "/", nil)
 		rec := httptest.NewRecorder()
@@ -50,8 +50,8 @@ func TestResponse_FluentBuilder(t *testing.T) {
 		assert.Equal(t, "alice", result.Name, "Name")
 	})
 	t.Run("stream_body", func(t *testing.T) {
-		handler := RequestParser(func(ctx Context, _ Req) *Response {
-			return ctx.Response(http.StatusOK).StreamBody(func(w io.Writer) error {
+		handler := RequestParser(func(ctx *Context, _ Req) {
+			ctx.NewResponse(http.StatusOK).StreamBody(func(w io.Writer) error {
 				_, err := w.Write([]byte("streamed"))
 				return err
 			})
@@ -63,8 +63,8 @@ func TestResponse_FluentBuilder(t *testing.T) {
 		assert.Equal(t, "streamed", rec.Body.String())
 	})
 	t.Run("bytes_body", func(t *testing.T) {
-		handler := RequestParser(func(ctx Context, _ Req) *Response {
-			return ctx.Response(http.StatusOK).BytesBody([]byte("raw bytes"))
+		handler := RequestParser(func(ctx *Context, _ Req) {
+			ctx.NewResponse(http.StatusOK).BytesBody([]byte("raw bytes"))
 		})
 		req, _ := http.NewRequest(http.MethodGet, "/", nil)
 		rec := httptest.NewRecorder()
@@ -73,8 +73,8 @@ func TestResponse_FluentBuilder(t *testing.T) {
 		assert.Equal(t, "raw bytes", rec.Body.String())
 	})
 	t.Run("string_body", func(t *testing.T) {
-		handler := RequestParser(func(ctx Context, _ Req) *Response {
-			return ctx.Response(http.StatusOK).StringBody("a string")
+		handler := RequestParser(func(ctx *Context, _ Req) {
+			ctx.NewResponse(http.StatusOK).StringBody("a string")
 		})
 		req, _ := http.NewRequest(http.MethodGet, "/", nil)
 		rec := httptest.NewRecorder()
@@ -86,10 +86,10 @@ func TestResponse_FluentBuilder(t *testing.T) {
 
 func TestResponse_Header(t *testing.T) {
 	type Req struct{}
-	handler := RequestParser(func(ctx Context, _ Req) *Response {
-		resp := ctx.Response(http.StatusOK)
+	handler := RequestParser(func(ctx *Context, _ Req) {
+		resp := ctx.NewResponse(http.StatusOK)
 		resp.Header().Set("X-Custom", "value")
-		return resp.PlainTextBody("ok")
+		resp.PlainTextBody("ok")
 	})
 	req, _ := http.NewRequest(http.MethodGet, "/", nil)
 	rec := httptest.NewRecorder()
@@ -103,8 +103,8 @@ func TestResponse_Header(t *testing.T) {
 func TestResponse_OctetsBody(t *testing.T) {
 	type Req struct{}
 	data := []byte{0x00, 0x01, 0x02, 0xFF}
-	handler := RequestParser(func(ctx Context, _ Req) *Response {
-		return ctx.Response(http.StatusOK).OctetsBody(data)
+	handler := RequestParser(func(ctx *Context, _ Req) {
+		ctx.NewResponse(http.StatusOK).OctetsBody(data)
 	})
 	req, _ := http.NewRequest(http.MethodGet, "/", nil)
 	rec := httptest.NewRecorder()
@@ -118,8 +118,8 @@ func TestResponse_OctetsBody(t *testing.T) {
 // ============ Response error paths ============
 
 func TestResponse_JsonMarshalError(t *testing.T) {
-	handler := RequestParser(func(_ Context, _ struct{}) *Response {
-		return (&Response{status: http.StatusOK, header: http.Header{}}).JsonBody(make(chan int))
+	handler := RequestParser(func(ctx *Context, _ struct{}) {
+		ctx.NewResponse(http.StatusOK).JsonBody(make(chan int))
 	})
 	rec := httptest.NewRecorder()
 	req, _ := http.NewRequest(http.MethodGet, "/", nil)
@@ -129,8 +129,9 @@ func TestResponse_JsonMarshalError(t *testing.T) {
 
 func TestResponse_UnknownBodyType(t *testing.T) {
 	type customBody struct{}
-	handler := RequestParser(func(_ Context, _ struct{}) *Response {
-		return &Response{status: http.StatusOK, header: http.Header{}, body: customBody{}}
+	handler := RequestParser(func(ctx *Context, _ struct{}) {
+		ctx.NewResponse(http.StatusOK)
+		ctx.body = customBody{}
 	})
 	rec := httptest.NewRecorder()
 	req, _ := http.NewRequest(http.MethodGet, "/", nil)
@@ -141,20 +142,23 @@ func TestResponse_UnknownBodyType(t *testing.T) {
 // ============ Response getters ============
 
 func TestResponse_StatusGetter(t *testing.T) {
-	r := &Response{status: http.StatusNotFound}
+	rec := httptest.NewRecorder()
+	r := (&Context{writer: rec}).NewResponse(http.StatusNotFound)
 	assert.Equal(t, http.StatusNotFound, r.Status())
 }
 
 func TestResponse_HeaderGetter(t *testing.T) {
-	h := http.Header{"X-Test": {"value"}}
-	r := &Response{header: h}
-	assert.Equal(t, h, r.Header())
+	rec := httptest.NewRecorder()
+	r := (&Context{writer: rec}).NewResponse(http.StatusOK)
+	r.Header().Set("X-Test", "value")
+	assert.Equal(t, "value", r.Header().Get("X-Test"))
 }
 
 func TestResponse_CookieSetter(t *testing.T) {
-	r := &Response{status: http.StatusOK, header: http.Header{}}
+	rec := httptest.NewRecorder()
+	r := (&Context{writer: rec}).NewResponse(http.StatusOK)
 	r.Cookie(http.Cookie{Name: "session", Value: "abc"})
-	assert.Len(t, r.header.Values("Set-Cookie"), 1)
+	assert.Len(t, rec.Header().Values("Set-Cookie"), 1)
 }
 
 // ============ http.StatusText ============
@@ -168,8 +172,8 @@ func TestStatusText(t *testing.T) {
 // ============ nil body (status-only response) ============
 
 func TestResponse_NilBody_StatusOnlyThroughHandler(t *testing.T) {
-	handler := func(ctx Context, _ struct{}) *Response {
-		return ctx.Response(http.StatusNoContent)
+	handler := func(ctx *Context, _ struct{}) {
+		ctx.NewResponse(http.StatusNoContent)
 	}
 	_, rec := doRequest[struct{}](t, handler, http.MethodGet, "/")
 	assert.Equal(t, http.StatusNoContent, rec.Code)

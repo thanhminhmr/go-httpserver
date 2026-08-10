@@ -72,9 +72,9 @@ func TestFormTag_ContentLengthZero_SkipsBinding(t *testing.T) {
 	req, _ := http.NewRequest(http.MethodPost, "/", nil)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	rec := httptest.NewRecorder()
-	RequestParser(func(ctx Context, req formSingleStruct) *Response {
+	RequestParser(func(ctx *Context, req formSingleStruct) {
 		captured = req
-		return ctx.Response(http.StatusOK)
+		ctx.NewResponse(http.StatusOK)
 	}).ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, "", captured.Name, "Name (no body)")
@@ -186,9 +186,9 @@ func TestJsonTag_ContentLengthZero_Skips(t *testing.T) {
 	req, _ := http.NewRequest(http.MethodPost, "/", nil)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
-	RequestParser(func(ctx Context, req jsonFieldStruct) *Response {
+	RequestParser(func(ctx *Context, req jsonFieldStruct) {
 		captured = req
-		return ctx.Response(http.StatusOK)
+		ctx.NewResponse(http.StatusOK)
 	}).ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, "", captured.Name, "Name (no body)")

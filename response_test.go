@@ -17,12 +17,12 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-// ============ Response.write (HTTP wire marshaling) ============
+// ============ Context.writeResponse (HTTP wire marshaling) ============
 
 func TestResponse_Write_NilBody(t *testing.T) {
 	rec := httptest.NewRecorder()
-	r := &Response{status: http.StatusNoContent, header: rec.Header()}
-	err := r.write(rec)
+	ctx := &Context{writer: rec, status: http.StatusNoContent}
+	err := ctx.writeResponse()
 	assert.NoError(t, err)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 	assert.Empty(t, rec.Body.Bytes())
@@ -32,8 +32,9 @@ func TestResponse_Write_NilBody(t *testing.T) {
 func TestResponse_Write_BytesBody(t *testing.T) {
 	rec := httptest.NewRecorder()
 	data := []byte("raw bytes")
-	r := (&Response{status: http.StatusOK, header: rec.Header()}).BytesBody(data)
-	err := r.write(rec)
+	ctx := &Context{writer: rec}
+	ctx.NewResponse(http.StatusOK).BytesBody(data)
+	err := ctx.writeResponse()
 	assert.NoError(t, err)
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, data, rec.Body.Bytes())
@@ -42,8 +43,9 @@ func TestResponse_Write_BytesBody(t *testing.T) {
 
 func TestResponse_Write_StringBody(t *testing.T) {
 	rec := httptest.NewRecorder()
-	r := (&Response{status: http.StatusOK, header: rec.Header()}).StringBody("a string")
-	err := r.write(rec)
+	ctx := &Context{writer: rec}
+	ctx.NewResponse(http.StatusOK).StringBody("a string")
+	err := ctx.writeResponse()
 	assert.NoError(t, err)
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, "a string", rec.Body.String())
@@ -52,11 +54,12 @@ func TestResponse_Write_StringBody(t *testing.T) {
 
 func TestResponse_Write_StreamBody(t *testing.T) {
 	rec := httptest.NewRecorder()
-	r := (&Response{status: http.StatusOK, header: rec.Header()}).StreamBody(func(w io.Writer) error {
+	ctx := &Context{writer: rec}
+	ctx.NewResponse(http.StatusOK).StreamBody(func(w io.Writer) error {
 		_, err := w.Write([]byte("streamed"))
 		return err
 	})
-	err := r.write(rec)
+	err := ctx.writeResponse()
 	assert.NoError(t, err)
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, "streamed", rec.Body.String())
@@ -66,18 +69,20 @@ func TestResponse_Write_StreamBody(t *testing.T) {
 func TestResponse_Write_StreamBody_Error(t *testing.T) {
 	rec := httptest.NewRecorder()
 	streamErr := errors.New("stream write failed")
-	r := (&Response{status: http.StatusOK, header: rec.Header()}).StreamBody(func(w io.Writer) error {
+	ctx := &Context{writer: rec}
+	ctx.NewResponse(http.StatusOK).StreamBody(func(w io.Writer) error {
 		return streamErr
 	})
-	err := r.write(rec)
+	err := ctx.writeResponse()
 	assert.ErrorIs(t, err, streamErr)
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
 func TestResponse_Write_PlainTextBody(t *testing.T) {
 	rec := httptest.NewRecorder()
-	r := (&Response{status: http.StatusOK, header: rec.Header()}).PlainTextBody("hello plain")
-	err := r.write(rec)
+	ctx := &Context{writer: rec}
+	ctx.NewResponse(http.StatusOK).PlainTextBody("hello plain")
+	err := ctx.writeResponse()
 	assert.NoError(t, err)
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, "hello plain", rec.Body.String())
@@ -87,8 +92,9 @@ func TestResponse_Write_PlainTextBody(t *testing.T) {
 func TestResponse_Write_OctetsBody(t *testing.T) {
 	rec := httptest.NewRecorder()
 	data := []byte{0x00, 0x01, 0x02, 0xFF}
-	r := (&Response{status: http.StatusOK, header: rec.Header()}).OctetsBody(data)
-	err := r.write(rec)
+	ctx := &Context{writer: rec}
+	ctx.NewResponse(http.StatusOK).OctetsBody(data)
+	err := ctx.writeResponse()
 	assert.NoError(t, err)
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, data, rec.Body.Bytes())
@@ -102,8 +108,9 @@ func TestResponse_Write_JsonBody(t *testing.T) {
 		Age  int    `json:"age"`
 	}
 	p := payload{Name: "alice", Age: 30}
-	r := (&Response{status: http.StatusCreated, header: rec.Header()}).JsonBody(p)
-	err := r.write(rec)
+	ctx := &Context{writer: rec}
+	ctx.NewResponse(http.StatusCreated).JsonBody(p)
+	err := ctx.writeResponse()
 	assert.NoError(t, err)
 	assert.Equal(t, http.StatusCreated, rec.Code)
 	assert.Equal(t, "application/json; charset=utf-8", rec.Header().Get("Content-Type"))
@@ -114,17 +121,17 @@ func TestResponse_Write_JsonBody(t *testing.T) {
 
 func TestResponse_Write_JsonBody_MarshalError(t *testing.T) {
 	rec := httptest.NewRecorder()
-	r := (&Response{status: http.StatusOK, header: rec.Header()}).JsonBody(make(chan int))
-	err := r.write(rec)
+	ctx := &Context{writer: rec}
+	ctx.NewResponse(http.StatusOK).JsonBody(make(chan int))
+	err := ctx.writeResponse()
 	assert.Error(t, err)
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
-	assert.Empty(t, rec.Header().Get("Content-Type"))
 }
 
 func TestResponse_Write_UnknownBodyType(t *testing.T) {
 	rec := httptest.NewRecorder()
-	r := &Response{status: http.StatusOK, header: rec.Header(), body: 12345}
-	err := r.write(rec)
+	ctx := &Context{writer: rec, status: http.StatusOK, body: 12345}
+	err := ctx.writeResponse()
 	assert.Error(t, err)
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }

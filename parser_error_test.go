@@ -25,9 +25,7 @@ import (
 
 func TestError_NilResponse_Returns500(t *testing.T) {
 	type Req struct{}
-	handler := RequestParser(func(_ Context, _ Req) *Response {
-		return nil
-	})
+	handler := RequestParser(func(_ *Context, _ Req) {})
 	req, _ := http.NewRequest(http.MethodGet, "/", nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)

@@ -204,9 +204,7 @@ func TestGoroutine_BinderPanic_Recovered(t *testing.T) {
 	type Req struct {
 		Value panicTextType `form:"value"`
 	}
-	handler := RequestParser(func(_ Context, _ Req) *Response {
-		return &Response{status: http.StatusOK}
-	})
+	handler := RequestParser(func(_ *Context, _ Req) {})
 	rec := httptest.NewRecorder()
 	req, _ := http.NewRequest(http.MethodPost, "/",
 		strings.NewReader("value=hello"))

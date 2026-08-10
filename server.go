@@ -71,10 +71,9 @@ func (s *httpServer) runner(ctx context.Context, shutdown context.CancelFunc) {
 	logger := zerolog.Ctx(ctx)
 	// dump all routes
 	logger.Info().Msg("Listing all routes...")
-	if err := chi.Walk(s.router, func(method string, route string, handler http.Handler, middlewares ...Middleware) error {
+	if err := chi.Walk(s.router, func(method, route string, handler http.Handler, middlewares ...Middleware) error {
 		logger.Info().Str("method", method).Str("route", route).
-			Object("handler", funcObject(handler)).
-			Array("middlewares", funcObjects(middlewares)).
+			Object("handler", funcObject(handler)).Array("middlewares", funcObjects(middlewares)).
 			Msg("Route")
 		return nil
 	}); err != nil {

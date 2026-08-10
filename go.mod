@@ -4,11 +4,10 @@ go 1.25.0
 
 require (
 	github.com/go-chi/chi/v5 v5.3.1
-	github.com/go-playground/validator/v10 v10.30.3
 	github.com/rs/zerolog v1.35.1
 	github.com/stretchr/testify v1.11.1
 	github.com/thanhminhmr/go-common v0.0.54
-	github.com/thanhminhmr/go-exception v0.0.16
+	github.com/thanhminhmr/go-exception v0.0.17
 	golang.org/x/net v0.57.0
 	golang.org/x/text v0.40.0
 )
@@ -18,6 +17,7 @@ require (
 	github.com/gabriel-vasile/mimetype v1.4.15 // indirect
 	github.com/go-playground/locales v0.14.1 // indirect
 	github.com/go-playground/universal-translator v0.18.1 // indirect
+	github.com/go-playground/validator/v10 v10.30.3 // indirect
 	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect
 	github.com/leodido/go-urn v1.5.0 // indirect
 	github.com/mattn/go-colorable v0.1.15 // indirect

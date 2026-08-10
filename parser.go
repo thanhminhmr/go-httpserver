@@ -7,6 +7,7 @@
 package httpserver
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"mime"
@@ -20,93 +21,61 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/go-playground/validator/v10"
 	"github.com/rs/zerolog"
 	"github.com/thanhminhmr/go-common/common"
 	"github.com/thanhminhmr/go-exception"
 )
 
-// RequestHandler is a handler function invoked by [RequestParser] after the
-// request has been parsed and validated. It receives the request [Context] and
-// the populated Request value, and returns a [*Response] to send to the client.
-// Returning nil signals a handler failure; the server responds with 500.
-type RequestHandler[Request any] = func(ctx Context, request Request) *Response
+// RequestHandler is invoked by [RequestParser] after the request has been parsed
+// and validated. It receives the request [Context] and the populated Request
+// value. Use [Context.NewResponse] to build the response; if the handler returns
+// without writing a response, the server responds with a 500 Internal Server
+// Error.
+type RequestHandler[Request any] = func(ctx *Context, request Request)
 
-// RequestParser parses an HTTP request and populates a struct using field tags
-// to map request data to struct fields.
-//
-// Tags are applied in the order listed below, from lowest to highest priority.
-// If multiple tags are present on the same field and more than one value is
-// available in the request, the value from the higher-priority tag is used
-// (e.g., `form` overrides `query`).
-//
-// Supported tags:
-//
-//   - `header`: If the tag value is not empty, the tag value must match the
-//     normalized HTTP header name. If the tag value is empty, the field must be of
-//     type [http.Header], and only one field with this tag is allowed per struct. When
-//     the tag value is empty, the field is populated by assigning the request's
-//     header map by reference, so mutations made to the map through the field are
-//     also visible through [http.Request.Header].
-//
-//   - `cookie`: If the tag value is not empty, the tag value must match the cookie
-//     name. If the tag value is empty, the field must be of type [KeyValues], and
-//     only one field with this tag is allowed per struct.
-//
-//   - `query`: If the tag value is not empty, the tag value must match the query
-//     parameter name. If the tag value is empty, the field must be of type
-//     [KeyValues], and only one field with this tag is allowed per struct.
-//
-//   - `url`: If the tag value is not empty, the tag value must match a named
-//     segment in the URL path. If the tag value is empty, the field must be of type
-//     [KeyValue], and only one field with this tag is allowed per struct.
-//
-//   - `form`: If the tag value is not empty, the tag value must match the form
-//     parameter name. If the tag value is empty, the field must be of type
-//     [KeyValues], and only one field with this tag is allowed per struct.
-//
-//   - `json`: If the tag value is empty, the request body is unmarshalled into
-//     this field using `encoding/json`, and only one field with this tag is allowed
-//     per struct. In this case, any type validation is handled by the JSON
-//     unmarshalling process. If the tag value is not empty, then the JSON body must
-//     be an object, and the tag value must match the JSON object field name.
-//
-//   - `multipart`: The tag value must be empty. Only one field with this tag
-//     is allowed per struct. The field must be of type [*multipart.Reader]. The
-//     reader is backed by the raw request body, which the server closes after the
-//     handler returns; the body must be consumed synchronously within the handler.
-//
-//   - `body`: Only one field with this tag is allowed per struct. The field must
-//     be of type [io.ReadCloser]. If the tag value is not empty, the tag value must
-//     be a semicolon-separated list of accepted Content-Types, and if `form`, `json`
-//     or `multipart` tag exists, the list must not contain those types. If the tag
-//     value is empty, the field will be mapped if no other body type are matched.
-//     The [io.ReadCloser] is the raw request body, which the server closes after the
-//     handler returns; the body must be consumed synchronously within the handler.
-//
-// If request parsing or validation fails, the handler is not invoked and an HTTP
-// error response is sent with the appropriate status code and an empty body; the
-// failure is logged at error level on the request logger. Parse failures use the
-// status returned by the specific binder (e.g. 400 for malformed input, 415 for
-// an unsupported or missing Content-Type); validation failures always return 400
-// Bad Request.
+// RequestParser returns an [http.HandlerFunc] that binds, validates, and
+// dispatches an incoming request to handler. See the package documentation for
+// the supported struct tags and binding rules.
 func RequestParser[Request any](handler RequestHandler[Request]) http.HandlerFunc {
 	tags := createTags(reflect.TypeFor[Request]())
 	return func(writer http.ResponseWriter, request *http.Request) {
 		var parsed Request
-		requestHandler(writer, request, &tags, &parsed, func(ctx Context) *Response {
-			return handler(ctx, parsed)
+		requestHandler(writer, request, &tags, &parsed, func(ctx *Context) { handler(ctx, parsed) })
+	}
+}
+
+// MiddlewareHandler is like [RequestHandler], but for middleware: after binding
+// and validation it calls next, forwarding the parsed [Context].
+type MiddlewareHandler[Request any] = func(ctx *Context, request Request, next func(ctx *Context))
+
+// MiddlewareParser returns a [Middleware] that binds and validates the request,
+// then invokes handler with the bound Context. See the package documentation for
+// the supported struct tags and binding rules.
+func MiddlewareParser[Request any](handler MiddlewareHandler[Request]) Middleware {
+	tags := createTags(reflect.TypeFor[Request]())
+	return func(next http.Handler) http.Handler {
+		nextFunc := func(ctx *Context) { next.ServeHTTP(ctx.writer, ctx.request) }
+		return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+			var parsed Request
+			requestHandler(writer, request, &tags, &parsed, func(ctx *Context) { handler(ctx, parsed, nextFunc) })
 		})
 	}
 }
 
-var requestValidator = validator.New(validator.WithRequiredStructEnabled())
-
 func requestHandler(
-	writer http.ResponseWriter, request *http.Request, tags *requestTags,
-	parsed any, handler func(ctx Context) *Response,
+	writer http.ResponseWriter, request *http.Request, tags *requestTags, parsed any, next func(ctx *Context),
 ) {
-	logger := zerolog.Ctx(request.Context())
+	requestCtx := request.Context()
+	logger := zerolog.Ctx(requestCtx)
+	// get server context
+	serverCtx, serverCtxExists := requestCtx.Value(serverCtxKey).(*Context)
+	// create server context if not exists
+	if !serverCtxExists {
+		serverCtx = &Context{writer: writer}
+		requestCtx = context.WithValue(requestCtx, serverCtxKey, serverCtx)
+		request = request.WithContext(requestCtx)
+		serverCtx.request = request
+	}
 	// apply default value for request
 	if err := common.ApplyDefaults(parsed); err != nil {
 		logger.Error().Err(err).Msg("Failed to apply request defaults")
@@ -120,25 +89,28 @@ func requestHandler(
 		return
 	}
 	// validate request
-	if err := requestValidator.Struct(parsed); err != nil {
+	if err := common.ValidateStruct(parsed); err != nil {
 		logger.Error().Err(err).Msg("Failed to validate request")
 		writer.WriteHeader(http.StatusBadRequest)
 		return
 	}
-	logger.Debug().Any("parsed", parsed).Msg("Request parsed")
-	// call handler and log error if any
-	response := handler(Context{Ctx: request.Context(), header: writer.Header()})
-	if response == nil {
-		logger.Error().Msg("Handler failed")
-		response = &Response{status: http.StatusInternalServerError}
-	} else {
-		logger.Debug().Any("response", response).Msg("Handler returned")
-	}
-	// write response
-	if err := response.write(writer); err != nil {
-		logger.Error().Err(err).Msg("Failed to write response")
+	logger.Trace().Any("parsed", parsed).Msg("Request parsed, calling handler...")
+	// call next handler
+	next(serverCtx)
+	// log handler response
+	logger.Trace().Any("response", serverCtx.Response()).Msg("Handler returned")
+	// write response if server context is created
+	if !serverCtxExists {
+		if serverCtx.status == 0 {
+			serverCtx.NewResponse(http.StatusInternalServerError)
+		}
+		if err := serverCtx.writeResponse(); err != nil {
+			logger.Error().Err(err).Msg("Failed to write response")
+		}
 	}
 }
+
+var serverCtxKey = reflect.TypeFor[requestTags]()
 
 //region requestTags
 

@@ -105,8 +105,8 @@ func BenchmarkValidation(b *testing.B) {
 
 func BenchmarkResponse_PlainText(b *testing.B) {
 	type Req struct{}
-	handler := RequestParser(func(ctx Context, _ Req) *Response {
-		return ctx.Response(http.StatusOK).PlainTextBody("hello world")
+	handler := RequestParser(func(ctx *Context, _ Req) {
+		ctx.NewResponse(http.StatusOK).PlainTextBody("hello world")
 	})
 	req, _ := http.NewRequest(http.MethodGet, "/", nil)
 	b.ResetTimer()
@@ -124,8 +124,8 @@ func BenchmarkResponse_JSON(b *testing.B) {
 		Email string `json:"email"`
 		Age   int    `json:"age"`
 	}
-	handler := RequestParser(func(ctx Context, _ Req) *Response {
-		return ctx.Response(http.StatusOK).JsonBody(Data{Name: "alice", Email: "alice@example.com", Age: 30})
+	handler := RequestParser(func(ctx *Context, _ Req) {
+		ctx.NewResponse(http.StatusOK).JsonBody(Data{Name: "alice", Email: "alice@example.com", Age: 30})
 	})
 	req, _ := http.NewRequest(http.MethodGet, "/", nil)
 	b.ResetTimer()
