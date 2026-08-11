@@ -5,7 +5,7 @@
  */
 
 // Package httpserver provides typed request parsing and response handling for
-// [chi].
+// [net/http].
 //
 // [RequestParser] and [MiddlewareParser] bind an HTTP request into a struct,
 // apply `default` values, validate the result, and call a typed handler.

@@ -17,7 +17,7 @@ framework built on the standard library [`http.ServeMux`](https://pkg.go.dev/net
 
 Type aliases re-exported for handler authors.
 
-- `Middleware` — `func(http.Handler) http.Handler`.
+- `Middleware` — `func(ctx *Context, next func())`. Wraps a handler in a chain; code after `next` runs on the way out.
 - `KeyValue` — `map[string]string`.
 - `KeyValues` — `map[string][]string`.
 
@@ -40,18 +40,15 @@ Core of the framework. Defines the binding contract via struct tags and generate
 handler.
 
 - `RequestHandler[Request]` — `func(ctx *Context, request Request)`.
-- `RequestParser[Request](handler RequestHandler[Request]) http.HandlerFunc` — public entry point. Builds the
+- `RequestParser[Request](handler RequestHandler[Request], middlewares ...Middleware) http.HandlerFunc` — public entry point. Builds the
   `requestTags` cache for `Request`, then returns a closure that allocates a zero `Request`, applies defaults, parses,
-  validates, and invokes the handler.
-- `MiddlewareHandler[Request]` — `func(ctx *Context, request Request, next func(ctx *Context))`.
+  validates, and invokes the handler. The `middlewares` wrap `handler` in declaration order.
+- `MiddlewareHandler[Request]` — `func(ctx *Context, request Request, next func())`.
 - `MiddlewareParser[Request](handler MiddlewareHandler[Request]) Middleware` — like `RequestParser` but produces a
-  `Middleware` that parses the request, then calls `next` with the server `Context`. If a `Context` already exists in
-  the request (set by an outer `RequestParser` or `MiddlewareParser`), it is reused.
-- `requestHandler` — shared orchestrator used by both `RequestParser` and `MiddlewareParser`: gets or creates a server
-  `Context` (stored in the request context under `serverCtxKey`), applies defaults, calls `tags.parse`, runs
-  `common.ValidateStruct`, then invokes the user handler. All parse/validation failures log at error level and write the
-  appropriate status.
-- `serverCtxKey` — `reflect.TypeFor[requestTags]()`, used as the context key for the server `Context`.
+  `Middleware` that parses the request, then calls `next` with the server `Context`.
+- `requestHandler` — shared helper used by both `RequestParser` and `MiddlewareParser`: applies defaults, calls
+  `tags.parse`, runs `common.ValidateStruct`, then invokes the user handler. All parse/validation failures log at error
+  level and set the status on the `Context`.
 - `requestTags` — cached descriptor for a `Request` struct. Holds bit flags (`tagHeader`, `tagCookie`, `tagQuery`,
   `tagUrl`, `tagForm`, `tagJson`, `tagMultipart`, `tagBody`) and field-index paths discovered during reflection.
 - `globalTags` / `globalTagsMutex` — process-wide cache mapping `reflect.Type` to its `requestTags`, populated lazily by

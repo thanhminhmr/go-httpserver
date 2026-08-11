@@ -7,7 +7,6 @@
 package httpserver
 
 import (
-	"context"
 	"encoding/json"
 	"io"
 	"mime"
@@ -36,15 +35,35 @@ type RequestHandler[Request any] = func(ctx *Context, request Request)
 // gets a fresh Request value which is defaulted, bound, validated, then passed
 // to handler.
 //
-// Parse and validation failures return an empty HTTP error response without
-// calling handler. If no parser handler configures a response, the outermost
-// parser returns 500 Internal Server Error. Handler panics are not recovered;
-// [NewServer] installs recovery middleware for that purpose.
-func RequestParser[Request any](handler RequestHandler[Request]) http.HandlerFunc {
+// Middlewares wrap handler in declaration order: RequestParser(handler, A, B)
+// runs A-before → B-before → handler → B-after → A-after.
+//
+// Parse and validation failures set the status on the [Context] and stop the
+// chain. If the chain returns without configuring a response, the parser writes
+// 500 Internal Server Error. Handler panics are not recovered; [NewServer]
+// installs recovery middleware for that purpose.
+func RequestParser[Request any](handler RequestHandler[Request], middlewares ...Middleware) http.HandlerFunc {
 	tags := createTags(reflect.TypeFor[Request]())
 	return func(writer http.ResponseWriter, request *http.Request) {
 		var parsed Request
-		requestHandler(writer, request, &tags, &parsed, func(ctx *Context) { handler(ctx, parsed) })
+		ctx := &Context{writer: writer, request: request}
+		logger := zerolog.Ctx(request.Context())
+		// Build middleware chain innermost-out: handler innermost, then wrap
+		// with each middleware from last to first.
+		next := func(ctx *Context) { handler(ctx, parsed) }
+		for i := len(middlewares) - 1; i >= 0; i-- {
+			mw := middlewares[i]
+			inner := next
+			next = func(ctx *Context) { mw(ctx, func() { inner(ctx) }) }
+		}
+		requestHandler(ctx, &tags, &parsed, logger, next)
+		// Ensure response is configured and write it.
+		if ctx.status == 0 {
+			ctx.NewResponse(http.StatusInternalServerError)
+		}
+		if err := ctx.writeResponse(); err != nil {
+			logger.Error().Err(err).Msg("Failed to write response")
+		}
 	}
 }
 
@@ -55,75 +74,41 @@ type MiddlewareHandler[Request any] = func(ctx *Context, request Request, next f
 // MiddlewareParser converts a typed [MiddlewareHandler] into [Middleware].
 // Request parsing and validation follow the same rules as [RequestParser].
 //
-// Parser middleware shares one [Context] with downstream parser handlers. The
-// request body is not buffered or rewound, so a body consumed by one parser
-// cannot be parsed again downstream. Direct writes by ordinary net/http handlers
-// bypass the shared response state.
-//
-// A parse or validation failure stops the chain and writes the error response
-// immediately. Otherwise, the outermost parser writes the configured response
-// after the chain returns.
+// The produced middleware parses its typed Request, validates it, and on
+// success calls handler with the parsed value and the downstream next. Parse
+// or validation failures set the status on the [Context] and stop the chain.
 func MiddlewareParser[Request any](handler MiddlewareHandler[Request]) Middleware {
 	tags := createTags(reflect.TypeFor[Request]())
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-			var parsed Request
-			requestHandler(writer, request, &tags, &parsed, func(ctx *Context) {
-				handler(ctx, parsed, func() { next.ServeHTTP(ctx.writer, ctx.request) })
-			})
+	return func(ctx *Context, next func()) {
+		var parsed Request
+		logger := zerolog.Ctx(ctx.request.Context())
+		requestHandler(ctx, &tags, &parsed, logger, func(innerCtx *Context) {
+			handler(innerCtx, parsed, next)
 		})
 	}
 }
 
+// requestHandler applies defaults, parses, and validates the request. On
+// failure it sets the status on ctx and returns. On success it logs and invokes
+// next with ctx.
 func requestHandler(
-	writer http.ResponseWriter, request *http.Request, tags *requestTags, parsed any, next func(ctx *Context),
+	ctx *Context, tags *requestTags, parsed any, logger *zerolog.Logger, next func(ctx *Context),
 ) {
-	requestCtx := request.Context()
-	logger := zerolog.Ctx(requestCtx)
-	// get server context
-	serverCtx, serverCtxExists := requestCtx.Value(serverCtxKey).(*Context)
-	// create server context if not exists
-	if !serverCtxExists {
-		serverCtx = &Context{writer: writer}
-		requestCtx = context.WithValue(requestCtx, serverCtxKey, serverCtx)
-		request = request.WithContext(requestCtx)
-		serverCtx.request = request
-	}
-	// apply default value for request
 	if err := common.ApplyDefaults(parsed); err != nil {
 		logger.Error().Err(err).Msg("Failed to apply request defaults")
-		writer.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-	// parse request
-	if status, err := tags.parse(request, reflect.ValueOf(parsed).Elem()); err != nil {
+		ctx.NewResponse(http.StatusInternalServerError)
+	} else if status, err := tags.parse(ctx.request, reflect.ValueOf(parsed).Elem()); err != nil {
 		logger.Error().Err(err).Msg("Failed to parse request")
-		writer.WriteHeader(status)
-		return
-	}
-	// validate request
-	if err := common.ValidateStruct(parsed); err != nil {
+		ctx.NewResponse(status)
+	} else if err := common.ValidateStruct(parsed); err != nil {
 		logger.Error().Err(err).Msg("Failed to validate request")
-		writer.WriteHeader(http.StatusBadRequest)
-		return
-	}
-	logger.Trace().Any("parsed", parsed).Msg("Request parsed, calling handler...")
-	// call next handler
-	next(serverCtx)
-	// log handler response
-	logger.Trace().Any("response", serverCtx.Response()).Msg("Handler returned")
-	// write response if server context is created
-	if !serverCtxExists {
-		if serverCtx.status == 0 {
-			serverCtx.NewResponse(http.StatusInternalServerError)
-		}
-		if err := serverCtx.writeResponse(); err != nil {
-			logger.Error().Err(err).Msg("Failed to write response")
-		}
+		ctx.NewResponse(http.StatusBadRequest)
+	} else {
+		logger.Trace().Any("parsed", parsed).Msg("Request parsed, calling handler...")
+		next(ctx)
+		logger.Trace().Any("response", ctx.Response()).Msg("Handler returned")
 	}
 }
-
-var serverCtxKey = reflect.TypeFor[requestTags]()
 
 //region requestTags
 

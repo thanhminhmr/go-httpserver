@@ -8,26 +8,7 @@ tradeoffs that should simply be documented and tested.
 
 ## Highest-priority review candidates
 
-### `NewResponse` does not reset the response marshaller (FIXED)
-
-`Context.NewResponse` resets `status` and `body` and clears the response headers, but it does not reset
-`Context.marshaller`.
-
-That makes the result depend on what body type was configured before the most recent `NewResponse` call. For example:
-
-```go
-ctx.NewResponse(http.StatusOK).JsonBody(value)
-ctx.NewResponse(http.StatusNoContent)
-```
-
-After the second call, `Response.Body()` is `nil`, but the response is still in JSON-marshalling mode. `writeResponse`
-therefore marshals the nil body as JSON instead of taking the normal nil-body path.
-
-**Possible change:** reset `marshaller` to `marshallerIsDirect` in `NewResponse`.
-
----
-
-### `NewResponse` clears headers owned by other middleware (UNDECIDED)
+### `NewResponse` clears all staged response headers (DECIDED)
 
 Every call to `Context.NewResponse` executes:
 
@@ -35,108 +16,87 @@ Every call to `Context.NewResponse` executes:
 clear(c.writer.Header())
 ```
 
-That clears all currently staged response headers, not only headers previously configured through `Response`. A
-conventional middleware that sets CORS, security, tracing, cache, or other headers before the endpoint runs can
-therefore have those headers removed when the endpoint calls `NewResponse`.
+That clears every header currently staged on the response writer — not only headers previously configured through
+`Response`, but also headers set by middleware before `next()`.
 
-This also means parser middleware that sets a response header before `next()` will lose that header if a downstream
-handler calls `NewResponse`.
-
-**Possible changes:** either preserve existing headers, distinguish framework-owned headers from externally-owned
-headers, or make the destructive reset an explicit API decision.
+This is an explicit API decision. Middleware that needs its headers to survive a downstream `NewResponse` call must set
+those headers *after* `next()` returns (on the way out of the chain). The `RequestParser(handler, A, B)` ordering
+guarantees that A-after runs after B-after, which runs after the handler returns.
 
 ---
 
-### Mixed parser and conventional middleware can lose request context updates (UNDECIDED)
+### `NewResponse` resets the response marshaller (FIXED)
 
-A `Context` stores the `*http.Request` only when the outermost parser creates the context. Nested calls to
-`requestHandler` reuse the same `Context` but do not refresh `Context.request`.
-
-`MiddlewareParser` later invokes downstream code with:
+`Context.NewResponse` now resets `status`, `body`, *and* `marshaller`:
 
 ```go
-next.ServeHTTP(ctx.writer, ctx.request)
+c.status, c.body, c.marshaller = status, nil, marshallerIsDirect
+clear(c.writer.Header())
 ```
 
-Consider this chain:
-
-1. `MiddlewareParser A` creates the framework `Context`.
-2. Conventional middleware calls `next.ServeHTTP(w, r.WithContext(...))`.
-3. `MiddlewareParser B` receives that newer request.
-4. `MiddlewareParser B` calls its `next()` function.
-
-Step 4 uses the request retained by A, so context values added in step 2 can disappear. `Context.Value`, `Deadline`,
-`Done`, and `Err` also delegate to that retained request.
-
-**Possible change:** when an existing framework `Context` is found, update its retained request for the duration of the
-nested parser invocation, or make parser continuation explicitly pass the current request.
+Previously the marshaller was not reset, so the result depended on the body type configured before the most recent
+`NewResponse` call. That is no longer possible.
 
 ---
 
-### `MiddlewareParser` does not fully interoperate with handlers that write directly (UNDECIDED)
+### Nested parse errors are represented in `Context` (FIXED)
 
-The outermost parser writes the response stored in `Context` after the parser chain returns. A conventional `net/http`
-handler writes directly to `http.ResponseWriter` and does not update that state.
+Binding and validation errors are now routed through `Context.NewResponse(status)` rather than being written directly
+via `writer.WriteHeader(status)`.
 
-If a `MiddlewareParser` wraps such a handler, the downstream handler may successfully write a response while
-`Context.status` remains zero. The outer parser then treats the framework response as missing, creates a 500 response,
-and attempts another write.
-
-The first committed HTTP status normally wins, so the client may still receive the downstream response, while framework
-state and logs describe a different response. Header clearing in the late `NewResponse(500)` can add more confusion.
-
-**Possible changes:** restrict/document `MiddlewareParser` as parser-chain-only middleware, or make the framework
-response writer capture direct writes back into `Context`.
+The outermost parser performs the final write after the chain returns, so middleware observing `Context.Response()`
+after `next()` sees the actual failure status. There is no longer a window where the wire response is already committed
+as 400/408/411/413/415 while the shared `Context.status` is still zero.
 
 ---
 
-### Nested parse errors bypass `Context` response state (UNDECIDED)
+### `MiddlewareParser` no longer wraps an `http.Handler` (RESOLVED)
 
-Binding and validation errors are written immediately with `writer.WriteHeader(status)` rather than being represented in
-`Context`.
+The previous design had `MiddlewareParser` return `func(next http.Handler) http.Handler`, which led to a mismatch
+between conventional `net/http` handlers writing directly and framework state.
 
-When an inner parser fails inside an outer `MiddlewareParser`, the wire response may already be committed as
-400/408/411/413/415 while the shared `Context.status` is still zero. The outer parser then creates a fallback 500 and
-attempts to write it after the earlier error.
+With the new framework-only `Middleware` shape (`func(ctx *Context, next func())`), middleware cannot be ordinary
+`net/http` code; everything flows through `Context`. The boundary between `net/http` and the framework is now exactly
+at `RequestParser`'s returned `http.HandlerFunc`.
 
-This can produce a mismatch between:
+---
 
-- the status actually sent to the client;
-- the status visible through `Context.Response()`;
-- the status recorded by framework trace logging; and
-- the status used by any middleware running after `next()`.
+### Mixed parser and conventional middleware can lose request context updates (RESOLVED)
 
-**Possible change:** represent parser failures in the shared `Context` and let only the outermost parser perform the
-final write.
+This was an artifact of the old shared-context design (`serverCtxKey` stashing and `Context.request` retention).
+
+With `serverCtxKey` removed and `Context.request` set once from the original request, the failure mode this note
+described no longer applies to the new `Middleware`-shaped API.
 
 ---
 
 ### JSON parsing accepts one value without checking for trailing input (FIXED)
 
-`bindJson` calls `json.Decoder.Decode` once and does not perform a second decode or otherwise require EOF.
-
-As a result, a body containing one valid JSON value followed by another JSON value or other trailing data can be
-accepted based on the first value alone.
-
-For request validation, APIs commonly require exactly one JSON value plus optional trailing whitespace.
-
-**Possible change:** after the first decode, require the next decode to return `io.EOF`.
-
-## Request-binding semantics that may surprise users
-
-### Request bodies are parsed only for POST, PUT, and PATCH (FIXED)
-
-Body tags are ignored for every other method, including DELETE. A DELETE request can contain a valid JSON body and still
-reach the handler with all JSON/body fields unbound.
-
-This is a framework policy rather than an HTTP requirement.
+`bindJson` now checks for trailing data after the first decode. A body containing one valid JSON value followed by any
+non-whitespace trailing content is rejected.
 
 ---
 
-### Any non-empty POST/PUT/PATCH body participates in body-type negotiation (INTENDED)
+### `NewResponse` does not reset the response marshaller (FIXED)
 
-For POST, PUT, and PATCH, `ContentLength != 0` causes the parser to inspect `Content-Type` even when the request struct
-declares no body-binding fields.
+`Context.NewResponse` resets `status`, `body`, *and* `marshaller`:
+
+```go
+c.status, c.body, c.marshaller = status, nil, marshallerIsDirect
+clear(c.writer.Header())
+```
+
+Previously the marshaller was not reset, so the result depended on the body type configured before the most recent
+`NewResponse` call.
+
+## Request-binding semantics that may surprise users
+
+### Request bodies are parsed only for POST, PUT, PATCH, and DELETE (INTENDED)
+
+Body tags are ignored for every other method (GET, HEAD, OPTIONS, etc.).
+
+For `POST`, `PUT`, `PATCH`, and `DELETE`, `ContentLength != 0` causes the parser to inspect `Content-Type` even when
+the request struct declares no body-binding fields.
 
 Consequences include:
 
@@ -146,9 +106,6 @@ Consequences include:
 
 An endpoint that only cares about query/header/path data can therefore reject a request solely because the client
 happened to send an unrelated body.
-
-**Possible change:** only negotiate a body when the request type declares at least one body binder, or explicitly keep
-the current strict policy.
 
 ---
 
@@ -173,30 +130,26 @@ This difference matters for resource-exhaustion behavior.
 
 ---
 
-### Raw `body` content types use a semicolon-separated custom syntax (FIXED)
+### Raw `body` content types use a whitespace-separated list (FIXED)
 
 A tag such as:
 
 ```go
-Body io.ReadCloser `body:"text/plain;application/xml"`
+Body io.ReadCloser `body:"text/plain application/xml"`
 ```
 
-is split with `strings.Split(value, ";")`. Entries are not trimmed.
+is split with `strings.Fields(value)`, which trims whitespace and splits on runs of whitespace.
 
 That means:
 
 ```go
-`body:"text/plain; application/xml"`
+`body:"text/plain application/xml"`
+`body:"text/plain  application/xml"`
+`body:" text/plain application/xml "`
 ```
 
-contains the literal second entry `" application/xml"`, which will not match the parsed media type `"application/xml"`.
-
-The syntax also looks like normal media-type parameter syntax even though semicolons mean "another accepted media type"
-here. Request `Content-Type` parameters are stripped by `mime.ParseMediaType` before comparison, so the tag should
-contain base media types only.
-
-**Possible change:** trim entries, use a less ambiguous separator, or replace the tag list with a different declaration
-mechanism.
+all produce the same two-entry list. This is stricter than the previous semicolon-based syntax and avoids ambiguity
+with media-type parameters.
 
 ---
 
@@ -240,9 +193,6 @@ type Request struct {
 
 Nested JSON can still work when the outer field itself participates in JSON binding, because that path delegates
 decoding/binding of the nested value.
-
-**Possible change:** either recurse through named structs consistently or document that parser-source tags must live at
-the top level or in anonymous embedded structs.
 
 ---
 
@@ -444,14 +394,11 @@ failure into a silent partial outage.
 
 If the package is approaching a stable public API, the highest-value decisions are probably:
 
-1. reset the response marshaller in `NewResponse`;
-2. decide whether `NewResponse` should clear middleware-owned headers;
-3. decide whether `MiddlewareParser` must interoperate with ordinary `net/http` handlers;
-4. fix request-context preservation across mixed middleware;
-5. route parse/validation failures through shared response state;
-6. decide whether JSON must reject trailing input;
-7. decide whether body parsing should be method-restricted and whether body negotiation should happen when no body tags
+1. decide whether body parsing should be method-restricted and whether body negotiation should happen when no body tags
    exist;
-8. make size/deadline policy consistent across body binders, or document the differences prominently.
+2. make size/deadline policy consistent across body binders, or document the differences prominently;
+3. decide whether JSON marshal failures should emit a valid JSON error body or just a 500;
+4. decide whether the `NewResponse` header-clear behavior should preserve middleware-set headers or stay as-is;
+5. decide whether parser-source tags should be allowed in named nested structs (currently they are ignored).
 
 The remaining items are mostly documentation and expectation-setting choices rather than correctness bugs.

@@ -6,10 +6,9 @@
 
 package httpserver
 
-import "net/http"
-
-// Middleware is the standard net/http middleware function shape.
-type Middleware = func(http.Handler) http.Handler
+// Middleware wraps a [Context] handler in a chain. Call next to continue the
+// chain; code after the next call runs on the way out, mirroring defer.
+type Middleware = func(ctx *Context, next func())
 
 // KeyValue holds all URL parameters for an empty `url:""` tag.
 type KeyValue = map[string]string
