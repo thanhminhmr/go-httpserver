@@ -51,7 +51,7 @@ func TestConcurrency_ChiRouter(t *testing.T) {
 		go func(idx int) {
 			defer wg.Done()
 			target := "/" + strconv.Itoa(idx)
-			_, rec := doChiRequest[Req](t, http.MethodGet, "/{id}", target, captureHandler[Req])
+			_, rec := doServeMuxRequest[Req](t, http.MethodGet, "/{id}", target, captureHandler[Req])
 			if rec.Code != http.StatusOK {
 				t.Errorf("request %d: status = %d, want %d", idx, rec.Code, http.StatusOK)
 			}

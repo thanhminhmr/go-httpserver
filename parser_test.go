@@ -16,8 +16,6 @@ import (
 	"net/url"
 	"strings"
 	"testing"
-
-	"github.com/go-chi/chi/v5"
 )
 
 // This file contains shared test infrastructure (request builders, setters, and
@@ -59,7 +57,7 @@ func doRequest[T any](t *testing.T, handler RequestHandler[T], method, target st
 	return captured, rec
 }
 
-func doChiRequest[T any](t *testing.T, method, pattern, target string, handler RequestHandler[T], setters ...RequestSetter) (*capturedRequest[T], *httptest.ResponseRecorder) {
+func doServeMuxRequest[T any](t *testing.T, method, pattern, target string, handler RequestHandler[T], setters ...RequestSetter) (*capturedRequest[T], *httptest.ResponseRecorder) {
 	t.Helper()
 	req, err := http.NewRequest(method, target, nil)
 	if err != nil {
@@ -69,14 +67,14 @@ func doChiRequest[T any](t *testing.T, method, pattern, target string, handler R
 		setter(req)
 	}
 	captured := &capturedRequest[T]{}
-	router := chi.NewRouter()
-	router.MethodFunc(method, pattern, RequestParser(func(ctx *Context, req T) {
+	mux := http.NewServeMux()
+	mux.Handle(method+" "+pattern, RequestParser(func(ctx *Context, req T) {
 		captured.ctx = ctx
 		captured.request = req
 		handler(ctx, req)
 	}))
 	rec := httptest.NewRecorder()
-	router.ServeHTTP(rec, req)
+	mux.ServeHTTP(rec, req)
 	return captured, rec
 }
 

@@ -123,7 +123,7 @@ func TestEmbed_EmptyUrlTag(t *testing.T) {
 	type Req struct {
 		Base
 	}
-	captured, rec := doChiRequest[Req](t, http.MethodGet, "/{id}", "/123",
+	captured, rec := doServeMuxRequest[Req](t, http.MethodGet, "/{id}", "/123",
 		captureHandler[Req])
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, KeyValue{"id": "123"}, captured.request.Params)

@@ -20,7 +20,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-chi/chi/v5"
 	"github.com/rs/zerolog"
 	"github.com/thanhminhmr/go-common/common"
 	"github.com/thanhminhmr/go-exception"
@@ -500,22 +499,21 @@ func (tags *requestTags) bindQuery(request *http.Request, parsed reflect.Value) 
 }
 
 func (tags *requestTags) bindUrl(request *http.Request, parsed reflect.Value) (int, error) {
-	// get route context from chi router
-	if routeContext := chi.RouteContext(request.Context()); routeContext != nil {
-		// check if there is any url params
-		if urlParams := &routeContext.URLParams; len(urlParams.Keys) > 0 {
-			// convert url params into key-value
-			keyValue := make(KeyValue, len(urlParams.Keys))
-			for index, key := range urlParams.Keys {
-				keyValue[key] = urlParams.Values[index]
-			}
-			// parse and bind url parameters
-			if tags.urlFieldIndex != nil {
-				parsed.FieldByIndex(tags.urlFieldIndex).Set(reflect.ValueOf(keyValue))
-			} else if err := common.BindStructWithTag("url", keyValue, parsed.Addr().Interface()); err != nil {
-				return http.StatusBadRequest, exception.String("HttpServer: Bind url params failed").AddCause(err)
-			}
-		}
+	// skip when there is no matched route pattern
+	if request.Pattern == "" {
+		return 0, nil
+	}
+	// collect named URL parameters from the matched route pattern
+	keyValue := getPathValues(request)
+	// no URL parameters collected
+	if len(keyValue) == 0 {
+		return 0, nil
+	}
+	// parse and bind url parameters
+	if tags.urlFieldIndex != nil {
+		parsed.FieldByIndex(tags.urlFieldIndex).Set(reflect.ValueOf(keyValue))
+	} else if err := common.BindStructWithTag("url", keyValue, parsed.Addr().Interface()); err != nil {
+		return http.StatusBadRequest, exception.String("HttpServer: Bind url params failed").AddCause(err)
 	}
 	return 0, nil
 }

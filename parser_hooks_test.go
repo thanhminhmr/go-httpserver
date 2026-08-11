@@ -151,7 +151,7 @@ func TestHook_NetIP_UrlTag(t *testing.T) {
 	type Req struct {
 		IP net.IP `url:"ip"`
 	}
-	captured, rec := doChiRequest[Req](t,
+	captured, rec := doServeMuxRequest[Req](t,
 		http.MethodGet, "/{ip}", "/192.168.1.1",
 		captureHandler[Req])
 	assert.Equal(t, http.StatusOK, rec.Code)
@@ -277,7 +277,7 @@ func TestHook_URLPointer_DoesNotWork(t *testing.T) {
 	type Req struct {
 		Target *url.URL `url:"target"`
 	}
-	_, rec := doChiRequest[Req](t,
+	_, rec := doServeMuxRequest[Req](t,
 		http.MethodGet, "/{target}", "/example.com",
 		captureHandler[Req])
 	assert.Equal(t, http.StatusBadRequest, rec.Code)

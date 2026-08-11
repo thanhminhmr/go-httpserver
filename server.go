@@ -15,8 +15,6 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/chi/v5/middleware"
 	"github.com/rs/zerolog"
 	"github.com/thanhminhmr/go-common/ctrl"
 	"github.com/thanhminhmr/go-exception"
@@ -42,18 +40,16 @@ type ServerConfig struct {
 	ShutdownOnError bool `cfg:"shutdown_on_error" default:"true"`
 }
 
-// NewServer creates a [chi.Mux], installs request logging and panic recovery,
-// and registers an [http.Server] with the [ctrl] lifecycle.
+// NewServer creates an [http.ServeMux], installs request logging and panic
+// recovery, and registers an [http.Server] with the [ctrl] lifecycle.
 //
 // The server listens on ":<config.Port>" when the lifecycle starts and shuts
 // down during cleanup. The config must already be defaulted and validated, and
 // should not be modified after this call. If serving fails unexpectedly,
 // ShutdownOnError controls whether the application lifecycle is canceled.
-func NewServer(config *ServerConfig) *chi.Mux {
+func NewServer(config *ServerConfig) *http.ServeMux {
 	// create route
-	router := chi.NewRouter()
-	// set a sane default middleware stack
-	router.Use(requestLogger)
+	router := http.NewServeMux()
 	// start the server
 	ctrl.Register(func(ctx, _ context.Context) (ctrl.Runner, ctrl.Cleaner) {
 		// create the http server
@@ -62,7 +58,7 @@ func NewServer(config *ServerConfig) *chi.Mux {
 			router: router,
 			server: http.Server{
 				Addr:              fmt.Sprintf(":%d", config.Port),
-				Handler:           router,
+				Handler:           requestLogger(router),
 				ReadHeaderTimeout: time.Duration(config.ReadHeaderTimeout) * time.Second,
 				IdleTimeout:       time.Duration(config.IdleTimeout) * time.Second,
 				MaxHeaderBytes:    config.MaxHeaderBytes,
@@ -77,25 +73,12 @@ func NewServer(config *ServerConfig) *chi.Mux {
 
 type httpServer struct {
 	config *ServerConfig
-	router *chi.Mux
+	router *http.ServeMux
 	server http.Server
 }
 
 func (s *httpServer) runner(ctx context.Context, shutdown context.CancelFunc) {
 	logger := zerolog.Ctx(ctx)
-	// dump all routes
-	logger.Info().Msg("Listing all routes...")
-	if err := chi.Walk(s.router, func(method, route string, handler http.Handler, middlewares ...Middleware) error {
-		logger.Info().Str("method", method).Str("route", route).
-			Object("handler", funcObject(handler)).Array("middlewares", funcObjects(middlewares)).
-			Msg("Route")
-		return nil
-	}); err != nil {
-		logger.Error().Err(err).Msg("Error walking routes")
-		exception.Panic(err)
-	}
-	logger.Info().Msg("Listed all routes")
-	// start the server
 	logger.Info().Str("address", s.server.Addr).Msg("Start serving")
 	if err := s.server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		logger.Error().Err(err).Msg("Server closed with error")
@@ -121,8 +104,8 @@ func requestLogger(next http.Handler) http.Handler {
 		// log request and response
 		logger.Info().Str("method", request.Method).Str("url", request.URL.String()).Msg("Request")
 		start := time.Now()
-		wrappedWriter := middleware.NewWrapResponseWriter(writer, request.ProtoMajor)
-		defer func(start time.Time, wrappedWriter middleware.WrapResponseWriter) {
+		wrappedWriter := newResponseWriterTracker(writer)
+		defer func(start time.Time, wrappedWriter *responseWriterTracker) {
 			duration := time.Since(start)
 			logger.Info().Int("status", wrappedWriter.Status()).
 				Int("bytes", wrappedWriter.BytesWritten()).

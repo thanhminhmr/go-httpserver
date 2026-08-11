@@ -650,7 +650,7 @@ type urlSingleStruct struct {
 }
 
 func TestUrlTag_SingleField_ChiRouteParam(t *testing.T) {
-	captured, rec := doChiRequest[urlSingleStruct](t,
+	captured, rec := doServeMuxRequest[urlSingleStruct](t,
 		http.MethodGet, "/users/{id}", "/users/42",
 		captureHandler[urlSingleStruct])
 	assert.Equal(t, http.StatusOK, rec.Code)
@@ -663,7 +663,7 @@ type urlMultipleStruct struct {
 }
 
 func TestUrlTag_MultipleRouteParams(t *testing.T) {
-	captured, rec := doChiRequest[urlMultipleStruct](t,
+	captured, rec := doServeMuxRequest[urlMultipleStruct](t,
 		http.MethodGet, "/users/{userId}/posts/{postId}", "/users/u123/posts/p456",
 		captureHandler[urlMultipleStruct])
 	assert.Equal(t, http.StatusOK, rec.Code)
@@ -676,7 +676,7 @@ type urlTypeCoercionStruct struct {
 }
 
 func TestUrlTag_TypeCoercion(t *testing.T) {
-	captured, rec := doChiRequest[urlTypeCoercionStruct](t,
+	captured, rec := doServeMuxRequest[urlTypeCoercionStruct](t,
 		http.MethodGet, "/items/{id}", "/items/99",
 		captureHandler[urlTypeCoercionStruct])
 	assert.Equal(t, http.StatusOK, rec.Code)
@@ -688,7 +688,7 @@ type urlAllStruct struct {
 }
 
 func TestUrlTag_EmptyTag_BindsAllParams(t *testing.T) {
-	captured, rec := doChiRequest[urlAllStruct](t,
+	captured, rec := doServeMuxRequest[urlAllStruct](t,
 		http.MethodGet, "/users/{userId}/posts/{postId}", "/users/u123/posts/p456",
 		captureHandler[urlAllStruct])
 	assert.Equal(t, http.StatusOK, rec.Code)

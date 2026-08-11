@@ -1,7 +1,7 @@
 # go-httpserver
 
 Internal developer documentation for `github.com/thanhminhmr/go-httpserver`, a declarative struct-tag driven HTTP server
-framework built on [chi](https://github.com/go-chi/chi).
+framework built on the standard library [`http.ServeMux`](https://pkg.go.dev/net/http#ServeMux).
 
 ## Source files
 
@@ -25,12 +25,11 @@ Type aliases re-exported for handler authors.
 
 - `ServerConfig` — configuration struct with `cfg` tags, `default` tags, and   `validate` constraints. Fields: `Port`,
   `ReadHeaderTimeout`, `IdleTimeout`, `MaxHeaderBytes`, `ShutdownOnError`.
-- `NewServer(config *ServerConfig) *chi.Mux` — constructs the chi router, installs the `requestLogger` middleware, and
-  registers a runner/cleaner pair with `ctrl.Register` so the server starts and shuts down with the application
-  lifecycle.
+- `NewServer(config *ServerConfig) *http.ServeMux` — constructs the ServeMux, wraps it with the `requestLogger`
+  middleware, and registers a runner/cleaner pair with `ctrl.Register` so the server starts and shuts down with the
+  application lifecycle.
 - `httpServer` — internal struct holding the config, router, and `http.Server`.
-- `(*httpServer).runner` — walks the router, logs every route, then calls `server.ListenAndServe`. Triggers `shutdown`
-  on error when `ShutdownOnError` is set.
+- `(*httpServer).runner` — calls `server.ListenAndServe`. Triggers `shutdown` on error when `ShutdownOnError` is set.
 - `(*httpServer). cleaner` — calls `server.Shutdown(ctx)` during cleanup.
 - `requestLogger` — middleware that attaches a per-request zerolog logger with a random base-36 `request_id`, logs the
   incoming request, and on exit logs status, bytes written, and duration. Panics are recovered and surfaced as 500s.
@@ -50,8 +49,8 @@ handler.
   the request (set by an outer `RequestParser` or `MiddlewareParser`), it is reused.
 - `requestHandler` — shared orchestrator used by both `RequestParser` and `MiddlewareParser`: gets or creates a server
   `Context` (stored in the request context under `serverCtxKey`), applies defaults, calls `tags.parse`, runs
-  `common.ValidateStruct`, then invokes the user handler. All parse/validation failures log at error level and write
-  the appropriate status.
+  `common.ValidateStruct`, then invokes the user handler. All parse/validation failures log at error level and write the
+  appropriate status.
 - `serverCtxKey` — `reflect.TypeFor[requestTags]()`, used as the context key for the server `Context`.
 - `requestTags` — cached descriptor for a `Request` struct. Holds bit flags (`tagHeader`, `tagCookie`, `tagQuery`,
   `tagUrl`, `tagForm`, `tagJson`, `tagMultipart`, `tagBody`) and field-index paths discovered during reflection.
@@ -68,7 +67,8 @@ handler.
   `common.BindStructWithTag("header", ...)`.
 - `(*requestTags).bindCookie` — collapses `request.Cookies()` into a `KeyValues` map and binds.
 - `(*requestTags).bindQuery` — binds `request.URL.Query()` via the empty `query:""` field.
-- `(*requestTags).bindUrl` — reads chi's `RouteContext`, builds a `KeyValue`, and binds via the `url:""` field.
+- `(*requestTags).bindUrl` — reads `request.PathValue` for each wildcard in `request.Pattern`, builds a `KeyValue`, and
+  binds via the `url:""` field.
 - `(*requestTags).bindForm` — reads the body, parses it as a URL-encoded form, and binds.
 - `(*requestTags).bindJson` — decodes the JSON body either into the field at `jsonFieldIndex` or into a generic
   `map[string]any` for tag-based binding.
@@ -91,7 +91,7 @@ handler.
 | `cookie:""`            | `KeyValues`          | Bind all cookies.                                 |
 | `query:"<Name>"`       | n/a                  | Bind a single query parameter.                    |
 | `query:""`             | `KeyValues`          | Bind all query parameters.                        |
-| `url:"<Name>"`         | n/a                  | Bind a named chi URL parameter.                   |
+| `url:"<Name>"`         | n/a                  | Bind a named ServeMux path wildcard.              |
 | `url:""`               | `KeyValue`           | Bind all URL parameters.                          |
 | `form:"<Name>"`        | n/a                  | Bind a single URL-encoded form field.             |
 | `form:""`              | `KeyValues`          | Bind the whole form.                              |
@@ -105,8 +105,8 @@ handler.
 ## response.go
 
 - `Context` — handler input passed by pointer. Wraps `request *http.Request`, `writer http.ResponseWriter`, and response
-  state (`status int`, `body any`). Implements `context.Context` via `Deadline/Done/Err/Value` delegating to the
-  request context, so a `*Context` can be passed anywhere a `context.Context` is expected.
+  state (`status int`, `body any`). Implements `context.Context` via `Deadline/Done/Err/Value` delegating to the request
+  context, so a `*Context` can be passed anywhere a `context.Context` is expected.
 - `Context.NewResponse(status int) Response` — begins a response: sets `status`, clears the writer header map, and
   returns a `Response` handle.
 - `Response` — `struct{ ctx *Context }`. A thin handle whose methods mutate the shared `Context`.
