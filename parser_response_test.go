@@ -28,7 +28,7 @@ func TestResponse_FluentBuilder(t *testing.T) {
 		})
 		req, _ := http.NewRequest(http.MethodGet, "/", nil)
 		rec := httptest.NewRecorder()
-		handler.ServeHTTP(rec, req)
+		asHTTPHandler(handler).ServeHTTP(rec, req)
 		assert.Equal(t, http.StatusCreated, rec.Code)
 		assert.Equal(t, "created", rec.Body.String())
 	})
@@ -41,7 +41,7 @@ func TestResponse_FluentBuilder(t *testing.T) {
 		})
 		req, _ := http.NewRequest(http.MethodGet, "/", nil)
 		rec := httptest.NewRecorder()
-		handler.ServeHTTP(rec, req)
+		asHTTPHandler(handler).ServeHTTP(rec, req)
 		assert.Equal(t, http.StatusOK, rec.Code)
 		var result Data
 		if err := json.NewDecoder(rec.Body).Decode(&result); err != nil {
@@ -58,7 +58,7 @@ func TestResponse_FluentBuilder(t *testing.T) {
 		})
 		req, _ := http.NewRequest(http.MethodGet, "/", nil)
 		rec := httptest.NewRecorder()
-		handler.ServeHTTP(rec, req)
+		asHTTPHandler(handler).ServeHTTP(rec, req)
 		assert.Equal(t, http.StatusOK, rec.Code)
 		assert.Equal(t, "streamed", rec.Body.String())
 	})
@@ -68,7 +68,7 @@ func TestResponse_FluentBuilder(t *testing.T) {
 		})
 		req, _ := http.NewRequest(http.MethodGet, "/", nil)
 		rec := httptest.NewRecorder()
-		handler.ServeHTTP(rec, req)
+		asHTTPHandler(handler).ServeHTTP(rec, req)
 		assert.Equal(t, http.StatusOK, rec.Code)
 		assert.Equal(t, "raw bytes", rec.Body.String())
 	})
@@ -78,7 +78,7 @@ func TestResponse_FluentBuilder(t *testing.T) {
 		})
 		req, _ := http.NewRequest(http.MethodGet, "/", nil)
 		rec := httptest.NewRecorder()
-		handler.ServeHTTP(rec, req)
+		asHTTPHandler(handler).ServeHTTP(rec, req)
 		assert.Equal(t, http.StatusOK, rec.Code)
 		assert.Equal(t, "a string", rec.Body.String())
 	})
@@ -93,7 +93,7 @@ func TestResponse_Header(t *testing.T) {
 	})
 	req, _ := http.NewRequest(http.MethodGet, "/", nil)
 	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
+	asHTTPHandler(handler).ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusOK, rec.Code)
 	if rec.Header().Get("X-Custom") != "value" {
 		t.Errorf("header X-Custom = %q, want %q", rec.Header().Get("X-Custom"), "value")
@@ -108,7 +108,7 @@ func TestResponse_OctetsBody(t *testing.T) {
 	})
 	req, _ := http.NewRequest(http.MethodGet, "/", nil)
 	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
+	asHTTPHandler(handler).ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusOK, rec.Code)
 	if !bytes.Equal(rec.Body.Bytes(), data) {
 		t.Errorf("body = %v, want %v", rec.Body.Bytes(), data)
@@ -123,7 +123,7 @@ func TestResponse_JsonMarshalError(t *testing.T) {
 	})
 	rec := httptest.NewRecorder()
 	req, _ := http.NewRequest(http.MethodGet, "/", nil)
-	handler.ServeHTTP(rec, req)
+	asHTTPHandler(handler).ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
 
@@ -135,7 +135,7 @@ func TestResponse_UnknownBodyType(t *testing.T) {
 	})
 	rec := httptest.NewRecorder()
 	req, _ := http.NewRequest(http.MethodGet, "/", nil)
-	handler.ServeHTTP(rec, req)
+	asHTTPHandler(handler).ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
 

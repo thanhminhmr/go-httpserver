@@ -72,10 +72,10 @@ func TestFormTag_ContentLengthZero_SkipsBinding(t *testing.T) {
 	req, _ := http.NewRequest(http.MethodPost, "/", nil)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	rec := httptest.NewRecorder()
-	RequestParser(func(ctx *Context, req formSingleStruct) {
+	asHTTPHandler(RequestParser(func(ctx *Context, req formSingleStruct) {
 		captured = req
 		ctx.NewResponse(http.StatusOK)
-	}).ServeHTTP(rec, req)
+	})).ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, "", captured.Name, "Name (no body)")
 }
@@ -186,10 +186,10 @@ func TestJsonTag_ContentLengthZero_Skips(t *testing.T) {
 	req, _ := http.NewRequest(http.MethodPost, "/", nil)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
-	RequestParser(func(ctx *Context, req jsonFieldStruct) {
+	asHTTPHandler(RequestParser(func(ctx *Context, req jsonFieldStruct) {
 		captured = req
 		ctx.NewResponse(http.StatusOK)
-	}).ServeHTTP(rec, req)
+	})).ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, "", captured.Name, "Name (no body)")
 }
@@ -273,7 +273,7 @@ func TestMultipartTag_MissingBoundary_400(t *testing.T) {
 	req.Header.Set("Content-Type", "multipart/form-data")
 	req.ContentLength = int64(len("garbage"))
 	rec := httptest.NewRecorder()
-	RequestParser(captureHandler[multipartStruct]).ServeHTTP(rec, req)
+	asHTTPHandler(RequestParser(captureHandler[multipartStruct])).ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 

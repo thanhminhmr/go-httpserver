@@ -47,9 +47,9 @@ func TestServeMux_RemainderParameter_BindsPath(t *testing.T) {
 		Path string `url:"path"`
 	}
 	mux := http.NewServeMux()
-	mux.Handle("GET /files/{path...}", RequestParser(func(ctx *Context, req Req) {
+	mux.Handle("GET /files/{path...}", asHTTPHandler(RequestParser(func(ctx *Context, req Req) {
 		ctx.NewResponse(http.StatusOK).JsonBody(req.Path)
-	}))
+	})))
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/files/a/b/c", nil)
 	mux.ServeHTTP(rec, req)

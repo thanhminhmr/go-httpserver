@@ -212,6 +212,6 @@ func TestGoroutine_BinderPanic(t *testing.T) {
 			strings.NewReader("value=hello"))
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded; charset=utf-8")
 		req.ContentLength = int64(len("value=hello"))
-		handler.ServeHTTP(rec, req)
+		asHTTPHandler(handler).ServeHTTP(rec, req)
 	})
 }

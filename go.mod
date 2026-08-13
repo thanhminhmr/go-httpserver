@@ -5,10 +5,10 @@ go 1.25.0
 require (
 	github.com/rs/zerolog v1.35.1
 	github.com/stretchr/testify v1.11.1
-	github.com/thanhminhmr/go-common v0.0.54
+	github.com/thanhminhmr/go-common v0.0.55
 	github.com/thanhminhmr/go-exception v0.0.17
-	golang.org/x/net v0.57.0
-	golang.org/x/text v0.40.0
+	golang.org/x/net v0.58.0
+	golang.org/x/text v0.41.0
 )
 
 require (
@@ -22,7 +22,7 @@ require (
 	github.com/mattn/go-colorable v0.1.15 // indirect
 	github.com/mattn/go-isatty v0.0.24 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
-	golang.org/x/crypto v0.54.0 // indirect
+	golang.org/x/crypto v0.55.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

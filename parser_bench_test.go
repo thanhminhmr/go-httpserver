@@ -24,7 +24,7 @@ func BenchmarkQuery_Simple(b *testing.B) {
 		Name string `query:"name"`
 		Age  int    `query:"age"`
 	}
-	handler := RequestParser(captureHandler[Req])
+	handler := asHTTPHandler(RequestParser(captureHandler[Req]))
 	req, _ := http.NewRequest(http.MethodGet, "/?name=alice&age=30", nil)
 	b.ResetTimer()
 	b.ReportAllocs()
@@ -39,7 +39,7 @@ func BenchmarkHeader_Simple(b *testing.B) {
 		Name string `header:"X-Name"`
 		Age  int    `header:"X-Age"`
 	}
-	handler := RequestParser(captureHandler[Req])
+	handler := asHTTPHandler(RequestParser(captureHandler[Req]))
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
@@ -56,7 +56,7 @@ func BenchmarkJSON_Body(b *testing.B) {
 		Name  string `json:"name"`
 		Email string `json:"email"`
 	}
-	handler := RequestParser(captureHandler[Req])
+	handler := asHTTPHandler(RequestParser(captureHandler[Req]))
 	bodyData, _ := json.Marshal(map[string]string{"name": "alice", "email": "alice@example.com"})
 	b.ResetTimer()
 	b.ReportAllocs()
@@ -74,7 +74,7 @@ func BenchmarkForm_Body(b *testing.B) {
 		Name  string `form:"name"`
 		Email string `form:"email"`
 	}
-	handler := RequestParser(captureHandler[Req])
+	handler := asHTTPHandler(RequestParser(captureHandler[Req]))
 	formBody := url.Values{"name": {"alice"}, "email": {"alice@example.com"}}.Encode()
 	b.ResetTimer()
 	b.ReportAllocs()
@@ -93,7 +93,7 @@ func BenchmarkValidation(b *testing.B) {
 		Email string `query:"email" validate:"required,email"`
 		Age   int    `query:"age" validate:"required,min=18,max=120"`
 	}
-	handler := RequestParser(captureHandler[Req])
+	handler := asHTTPHandler(RequestParser(captureHandler[Req]))
 	req, _ := http.NewRequest(http.MethodGet, "/?name=alice&email=alice@example.com&age=30", nil)
 	b.ResetTimer()
 	b.ReportAllocs()
@@ -105,9 +105,9 @@ func BenchmarkValidation(b *testing.B) {
 
 func BenchmarkResponse_PlainText(b *testing.B) {
 	type Req struct{}
-	handler := RequestParser(func(ctx *Context, _ Req) {
+	handler := asHTTPHandler(RequestParser(func(ctx *Context, _ Req) {
 		ctx.NewResponse(http.StatusOK).PlainTextBody("hello world")
-	})
+	}))
 	req, _ := http.NewRequest(http.MethodGet, "/", nil)
 	b.ResetTimer()
 	b.ReportAllocs()
@@ -124,9 +124,9 @@ func BenchmarkResponse_JSON(b *testing.B) {
 		Email string `json:"email"`
 		Age   int    `json:"age"`
 	}
-	handler := RequestParser(func(ctx *Context, _ Req) {
+	handler := asHTTPHandler(RequestParser(func(ctx *Context, _ Req) {
 		ctx.NewResponse(http.StatusOK).JsonBody(Data{Name: "alice", Email: "alice@example.com", Age: 30})
-	})
+	}))
 	req, _ := http.NewRequest(http.MethodGet, "/", nil)
 	b.ResetTimer()
 	b.ReportAllocs()
@@ -140,7 +140,7 @@ func BenchmarkMultipart_Body(b *testing.B) {
 	type Req struct {
 		Reader *multipartReader `multipart:""`
 	}
-	handler := RequestParser(captureHandler[Req])
+	handler := asHTTPHandler(RequestParser(captureHandler[Req]))
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
@@ -168,7 +168,7 @@ func BenchmarkComplex_Request(b *testing.B) {
 		Page    int     `query:"page" validate:"min=1"`
 		Address Address `json:"address" validate:"required"`
 	}
-	handler := RequestParser(captureHandler[Req])
+	handler := asHTTPHandler(RequestParser(captureHandler[Req]))
 	bodyData, _ := json.Marshal(map[string]string{"street": "123 Main St", "city": "Springfield"})
 	b.ResetTimer()
 	b.ReportAllocs()
@@ -187,7 +187,7 @@ func BenchmarkRawBody(b *testing.B) {
 	type Req struct {
 		Body io.ReadCloser `body:""`
 	}
-	handler := RequestParser(captureHandler[Req])
+	handler := asHTTPHandler(RequestParser(captureHandler[Req]))
 	data := []byte("raw body data for benchmarking")
 	b.ResetTimer()
 	b.ReportAllocs()

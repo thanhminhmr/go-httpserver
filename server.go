@@ -47,18 +47,19 @@ type ServerConfig struct {
 // down during cleanup. The config must already be defaulted and validated, and
 // should not be modified after this call. If serving fails unexpectedly,
 // ShutdownOnError controls whether the application lifecycle is canceled.
-func NewServer(config *ServerConfig) *http.ServeMux {
+func NewServer(logger *zerolog.Logger, config *ServerConfig) Router {
 	// create route
-	router := http.NewServeMux()
+	serveMux := http.NewServeMux()
 	// start the server
 	ctrl.Register(func(ctx, _ context.Context) (ctrl.Runner, ctrl.Cleaner) {
 		// create the http server
-		server := httpServer{
-			config: config,
-			router: router,
+		var server httpServer
+		server = httpServer{
+			config:   config,
+			serveMux: serveMux,
 			server: http.Server{
 				Addr:              fmt.Sprintf(":%d", config.Port),
-				Handler:           requestLogger(router),
+				Handler:           &server,
 				ReadHeaderTimeout: time.Duration(config.ReadHeaderTimeout) * time.Second,
 				IdleTimeout:       time.Duration(config.IdleTimeout) * time.Second,
 				MaxHeaderBytes:    config.MaxHeaderBytes,
@@ -67,14 +68,14 @@ func NewServer(config *ServerConfig) *http.ServeMux {
 		// return the runner and the cleaner
 		return server.runner, server.cleaner
 	})
-	// return the router and the starter func
-	return router
+	// return the router
+	return Router{serveMux: serveMux, logger: logger}
 }
 
 type httpServer struct {
-	config *ServerConfig
-	router *http.ServeMux
-	server http.Server
+	config   *ServerConfig
+	serveMux *http.ServeMux
+	server   http.Server
 }
 
 func (s *httpServer) runner(ctx context.Context, shutdown context.CancelFunc) {
@@ -97,30 +98,29 @@ func (s *httpServer) cleaner(ctx context.Context) {
 	logger.Info().Msg("Shutdown complete")
 }
 
-func requestLogger(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		logger := zerolog.Ctx(request.Context()).With().
-			Str("request_id", strconv.FormatUint(rand.Uint64(), 36)).Logger()
-		// log request and response
-		logger.Info().Str("method", request.Method).Str("url", request.URL.String()).Msg("Request")
-		start := time.Now()
-		wrappedWriter := newResponseWriterTracker(writer)
-		defer func(start time.Time, wrappedWriter *responseWriterTracker) {
-			duration := time.Since(start)
-			logger.Info().Int("status", wrappedWriter.Status()).
-				Int("bytes", wrappedWriter.BytesWritten()).
-				Dur("duration", duration).
-				Msg("Response")
-		}(start, wrappedWriter)
-		// recover any panic
-		defer exception.Recover(func(recovered exception.Exception) {
-			logger.Error().Any("recovered", recovered).Msg("Recovered from panic")
-			// response with 500 Internal Server Error
-			if wrappedWriter.Status() == 0 {
-				wrappedWriter.WriteHeader(http.StatusInternalServerError)
-			}
-		})
-		// call the next handler
-		next.ServeHTTP(wrappedWriter, request.WithContext(logger.WithContext(request.Context())))
+func (s *httpServer) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
+	logger := zerolog.Ctx(request.Context()).With().
+		Str("request_id", strconv.FormatUint(rand.Uint64(), 36)).Logger()
+	// log request and response
+	logger.Info().Str("method", request.Method).Str("host", request.Host).
+		Str("path", request.URL.Path).Msg("Request")
+	start := time.Now()
+	wrappedWriter := newResponseWriterTracker(writer)
+	defer func(start time.Time, wrappedWriter *responseWriterTracker) {
+		duration := time.Since(start)
+		logger.Info().Int("status", wrappedWriter.Status()).
+			Int("bytes", wrappedWriter.BytesWritten()).
+			Dur("duration", duration).
+			Msg("Response")
+	}(start, wrappedWriter)
+	// recover any panic
+	defer exception.Recover(func(recovered exception.Exception) {
+		logger.Error().Any("recovered", recovered).Msg("Recovered from panic")
+		// response with 500 Internal Server Error
+		if wrappedWriter.Status() == 0 {
+			wrappedWriter.WriteHeader(http.StatusInternalServerError)
+		}
 	})
+	// call the serveMux handler
+	s.serveMux.ServeHTTP(wrappedWriter, request.WithContext(logger.WithContext(request.Context())))
 }

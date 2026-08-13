@@ -53,7 +53,7 @@ func (c *Context) Value(key any) any { return c.request.Context().Value(key) }
 
 // Response returns a handle to the current response without changing it.
 // Its status is zero until [Context.NewResponse] is called.
-func (c *Context) Response() *Response { return &Response{ctx: c} }
+func (c *Context) Response() Response { return Response{ctx: c} }
 
 // NewResponse starts a new response with status and returns its handle.
 // It clears the previous body and all response headers. The response is written

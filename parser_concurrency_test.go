@@ -21,7 +21,7 @@ func TestConcurrency_ParallelRequests(t *testing.T) {
 	type Req struct {
 		Name string `query:"name" validate:"required"`
 	}
-	handler := RequestParser(captureHandler[Req])
+	handler := asHTTPHandler(RequestParser(captureHandler[Req]))
 	const n = 100
 	var wg sync.WaitGroup
 	wg.Add(n)

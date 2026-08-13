@@ -37,6 +37,20 @@ func captureHandler[T any](ctx *Context, _ T) {
 
 type RequestSetter func(*http.Request)
 
+// asHTTPHandler adapts a [Handler] into an [http.HandlerFunc] for tests. It
+// creates a [Context], runs the handler, defaults to 500 when no response was
+// configured, and writes the response. This mirrors what [Router.Handle] does.
+func asHTTPHandler(handler Handler) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := &Context{request: r, writer: w}
+		handler(ctx)
+		if ctx.status == 0 {
+			ctx.NewResponse(http.StatusInternalServerError)
+		}
+		_ = ctx.writeResponse()
+	}
+}
+
 func doRequest[T any](t *testing.T, handler RequestHandler[T], method, target string, setters ...RequestSetter) (*capturedRequest[T], *httptest.ResponseRecorder) {
 	t.Helper()
 	req, err := http.NewRequest(method, target, nil)
@@ -47,11 +61,11 @@ func doRequest[T any](t *testing.T, handler RequestHandler[T], method, target st
 		setter(req)
 	}
 	captured := &capturedRequest[T]{}
-	wrappedHandler := RequestParser(func(ctx *Context, req T) {
+	wrappedHandler := asHTTPHandler(RequestParser(func(ctx *Context, req T) {
 		captured.ctx = ctx
 		captured.request = req
 		handler(ctx, req)
-	})
+	}))
 	rec := httptest.NewRecorder()
 	wrappedHandler.ServeHTTP(rec, req)
 	return captured, rec
@@ -68,11 +82,11 @@ func doServeMuxRequest[T any](t *testing.T, method, pattern, target string, hand
 	}
 	captured := &capturedRequest[T]{}
 	mux := http.NewServeMux()
-	mux.Handle(method+" "+pattern, RequestParser(func(ctx *Context, req T) {
+	mux.Handle(method+" "+pattern, asHTTPHandler(RequestParser(func(ctx *Context, req T) {
 		captured.ctx = ctx
 		captured.request = req
 		handler(ctx, req)
-	}))
+	})))
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 	return captured, rec

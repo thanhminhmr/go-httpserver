@@ -8,48 +8,14 @@ package httpserver
 
 import (
 	"net/http"
-	"net/http/httptest"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 )
 
-// ============ requestLogger middleware ============
-
 func testLoggerHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("hello"))
-}
-
-func TestRequestLogger_BasicRequest(t *testing.T) {
-	handler := requestLogger(http.HandlerFunc(testLoggerHandler))
-	req, _ := http.NewRequest(http.MethodGet, "/", nil)
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-	assert.Equal(t, http.StatusOK, rec.Code)
-	assert.Equal(t, "hello", rec.Body.String())
-}
-
-func TestRequestLogger_PanicRecovery(t *testing.T) {
-	handler := requestLogger(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		panic("boom")
-	}))
-	req, _ := http.NewRequest(http.MethodGet, "/", nil)
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-	assert.Equal(t, http.StatusInternalServerError, rec.Code)
-}
-
-func TestRequestLogger_StatusPreserved(t *testing.T) {
-	handler := requestLogger(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusBadRequest)
-		_, _ = w.Write([]byte("bad request"))
-	}))
-	req, _ := http.NewRequest(http.MethodGet, "/", nil)
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
-	assert.Equal(t, "bad request", rec.Body.String())
 }
 
 // ============ funcObject / funcObjects ============

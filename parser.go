@@ -7,7 +7,6 @@
 package httpserver
 
 import (
-	"context"
 	"encoding/json"
 	"io"
 	"mime"
@@ -40,11 +39,11 @@ type RequestHandler[Request any] = func(ctx *Context, request Request)
 // calling handler. If no parser handler configures a response, the outermost
 // parser returns 500 Internal Server Error. Handler panics are not recovered;
 // [NewServer] installs recovery middleware for that purpose.
-func RequestParser[Request any](handler RequestHandler[Request]) http.HandlerFunc {
+func RequestParser[Request any](handler RequestHandler[Request]) Handler {
 	tags := createTags(reflect.TypeFor[Request]())
-	return func(writer http.ResponseWriter, request *http.Request) {
+	return func(ctx *Context) {
 		var parsed Request
-		requestHandler(writer, request, &tags, &parsed, func(ctx *Context) { handler(ctx, parsed) })
+		requestHandler(ctx, &tags, &parsed, func(ctx *Context) { handler(ctx, parsed) })
 	}
 }
 
@@ -65,62 +64,37 @@ type MiddlewareHandler[Request any] = func(ctx *Context, request Request, next f
 // after the chain returns.
 func MiddlewareParser[Request any](handler MiddlewareHandler[Request]) Middleware {
 	tags := createTags(reflect.TypeFor[Request]())
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-			var parsed Request
-			requestHandler(writer, request, &tags, &parsed, func(ctx *Context) {
-				handler(ctx, parsed, func() { next.ServeHTTP(ctx.writer, ctx.request) })
-			})
-		})
+	return func(ctx *Context, next func()) {
+		var parsed Request
+		requestHandler(ctx, &tags, &parsed, func(ctx *Context) { handler(ctx, parsed, next) })
 	}
 }
 
-func requestHandler(
-	writer http.ResponseWriter, request *http.Request, tags *requestTags, parsed any, next func(ctx *Context),
-) {
-	requestCtx := request.Context()
-	logger := zerolog.Ctx(requestCtx)
-	// get server context
-	serverCtx, serverCtxExists := requestCtx.Value(serverCtxKey).(*Context)
-	// create server context if not exists
-	if !serverCtxExists {
-		serverCtx = &Context{writer: writer}
-		requestCtx = context.WithValue(requestCtx, serverCtxKey, serverCtx)
-		request = request.WithContext(requestCtx)
-		serverCtx.request = request
-	}
+func requestHandler(ctx *Context, tags *requestTags, parsed any, next Handler) {
+	logger := zerolog.Ctx(ctx)
 	// apply default value for request
 	if err := common.ApplyDefaults(parsed); err != nil {
 		logger.Error().Err(err).Msg("Failed to apply request defaults")
-		writer.WriteHeader(http.StatusInternalServerError)
+		ctx.NewResponse(http.StatusInternalServerError)
 		return
 	}
 	// parse request
-	if status, err := tags.parse(request, reflect.ValueOf(parsed).Elem()); err != nil {
+	if status, err := tags.parse(ctx.request, reflect.ValueOf(parsed).Elem()); err != nil {
 		logger.Error().Err(err).Msg("Failed to parse request")
-		writer.WriteHeader(status)
+		ctx.NewResponse(status)
 		return
 	}
 	// validate request
 	if err := common.ValidateStruct(parsed); err != nil {
 		logger.Error().Err(err).Msg("Failed to validate request")
-		writer.WriteHeader(http.StatusBadRequest)
+		ctx.NewResponse(http.StatusBadRequest)
 		return
 	}
 	logger.Trace().Any("parsed", parsed).Msg("Request parsed, calling handler...")
 	// call next handler
-	next(serverCtx)
+	next(ctx)
 	// log handler response
-	logger.Trace().Any("response", serverCtx.Response()).Msg("Handler returned")
-	// write response if server context is created
-	if !serverCtxExists {
-		if serverCtx.status == 0 {
-			serverCtx.NewResponse(http.StatusInternalServerError)
-		}
-		if err := serverCtx.writeResponse(); err != nil {
-			logger.Error().Err(err).Msg("Failed to write response")
-		}
-	}
+	logger.Trace().Object("response", ctx.Response()).Msg("Handler returned")
 }
 
 var serverCtxKey = reflect.TypeFor[requestTags]()

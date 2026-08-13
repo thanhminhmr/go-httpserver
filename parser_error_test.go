@@ -28,7 +28,7 @@ func TestError_NilResponse_Returns500(t *testing.T) {
 	handler := RequestParser(func(_ *Context, _ Req) {})
 	req, _ := http.NewRequest(http.MethodGet, "/", nil)
 	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
+	asHTTPHandler(handler).ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 	assert.Empty(t, rec.Body.String())
 }
@@ -42,7 +42,7 @@ func TestError_MissingContentType_415(t *testing.T) {
 	req, _ := http.NewRequest(http.MethodPost, "/", body)
 	req.ContentLength = int64(len(`{"data":"hello"}`))
 	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
+	asHTTPHandler(handler).ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusUnsupportedMediaType, rec.Code)
 	assert.Empty(t, rec.Body.String())
 }
@@ -57,7 +57,7 @@ func TestError_InvalidContentType_400(t *testing.T) {
 	req.Header.Set("Content-Type", "not a valid media type")
 	req.ContentLength = int64(len(`{"data":"hello"}`))
 	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
+	asHTTPHandler(handler).ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Empty(t, rec.Body.String())
 }
@@ -82,7 +82,7 @@ func TestError_MissingContentLength_411(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	req.ContentLength = -1
 	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
+	asHTTPHandler(handler).ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusLengthRequired, rec.Code)
 	assert.Empty(t, rec.Body.String())
 }
@@ -100,7 +100,7 @@ func TestError_BodyTooLarge_413(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	req.ContentLength = int64(len(largeBody))
 	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
+	asHTTPHandler(handler).ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusRequestEntityTooLarge, rec.Code)
 	assert.Empty(t, rec.Body.String())
 }
@@ -125,7 +125,7 @@ func TestError_BodyTimeout_408(t *testing.T) {
 	req.ContentLength = 100
 	rec := httptest.NewRecorder()
 	start := time.Now()
-	handler.ServeHTTP(rec, req)
+	asHTTPHandler(handler).ServeHTTP(rec, req)
 	elapsed := time.Since(start)
 	assert.Equal(t, http.StatusRequestTimeout, rec.Code)
 	assert.Empty(t, rec.Body.String())
