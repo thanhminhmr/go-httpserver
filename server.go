@@ -40,6 +40,11 @@ type ServerConfig struct {
 	ShutdownOnError bool `cfg:"shutdown_on_error" default:"true"`
 }
 
+// registerServer is the seam through which [NewServer] registers its
+// lifecycle starter. Production code uses [ctrl.Register]; tests may replace
+// this variable to capture the starter without involving controller globals.
+var registerServer = ctrl.Register
+
 // NewServer creates an [http.ServeMux], installs request logging and panic
 // recovery, and registers an [http.Server] with the [ctrl] lifecycle.
 //
@@ -51,7 +56,7 @@ func NewServer(logger *zerolog.Logger, config *ServerConfig) Router {
 	// create route
 	serveMux := http.NewServeMux()
 	// start the server
-	ctrl.Register(func(ctx, _ context.Context) (ctrl.Runner, ctrl.Cleaner) {
+	registerServer(func(ctx, _ context.Context) (ctrl.Runner, ctrl.Cleaner) {
 		// create the http server
 		var server httpServer
 		server = httpServer{

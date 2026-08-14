@@ -10,16 +10,20 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/thanhminhmr/go-common/ctrl"
 )
 
 // ============ httpServer.ServeHTTP integration tests ============
@@ -325,4 +329,119 @@ func TestHTTPServer_Cleaner_ShutdownError_LogsAndCompletes(t *testing.T) {
 
 	assert.Contains(t, logBuf.String(), "Error while shutting down")
 	assert.Contains(t, logBuf.String(), "Shutdown complete")
+}
+
+// freeTCPPort reserves an ephemeral TCP port by opening a listener on
+// 127.0.0.1:0, reading the assigned port, and then closing the listener.
+// The caller uses the returned port to bind the real server. This pattern is
+// inherently racy, but is acceptable for tests that bind immediately.
+func freeTCPPort(t *testing.T) uint16 {
+	t.Helper()
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	require.NoError(t, err)
+	addr := listener.Addr().(*net.TCPAddr)
+	require.NoError(t, listener.Close())
+	return uint16(addr.Port)
+}
+
+// TestNewServer_Lifecycle exercises the full [NewServer] wiring through a
+// minimal fake lifecycle: it captures the registered starter, invokes it to
+// obtain the runner and cleaner, starts the runner, makes one real HTTP
+// request, and then triggers cleanup. It must restore [registerServer] and
+// leave no running goroutine or open listener behind.
+func TestNewServer_Lifecycle(t *testing.T) {
+	var logBuf bytes.Buffer
+	logger := zerolog.New(&logBuf)
+
+	port := freeTCPPort(t)
+
+	// Capture the starter instead of running it immediately.
+	originalRegister := registerServer
+	t.Cleanup(func() { registerServer = originalRegister })
+
+	var starter ctrl.Starter
+	registerServer = func(s ctrl.Starter) { starter = s }
+
+	config := &ServerConfig{
+		Port:              port,
+		ReadHeaderTimeout: 5,
+		IdleTimeout:       60,
+		MaxHeaderBytes:    4096,
+		ShutdownOnError:   true,
+	}
+
+	router := NewServer(&logger, config)
+	require.NotNil(t, starter, "NewServer must register exactly one starter")
+
+	router.Handle("GET /", func(ctx *Context) {
+		ctx.NewResponse(http.StatusOK).StringBody("ok")
+	})
+
+	lifecycleCtx, lifecycleCancel := context.WithCancel(
+		logger.WithContext(context.Background()),
+	)
+	defer lifecycleCancel()
+
+	runner, cleaner := starter(lifecycleCtx, lifecycleCtx)
+	require.NotNil(t, runner)
+	require.NotNil(t, cleaner)
+
+	// Defensive cleanup so an earlier assertion failure still stops the
+	// server. Calling the cleaner twice is harmless because
+	// http.Server.Shutdown on an already-shutdown server returns nil.
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		cleaner(ctx)
+	})
+
+	runnerDone := make(chan struct{})
+	go func() {
+		defer close(runnerDone)
+		runner(lifecycleCtx, lifecycleCancel)
+	}()
+
+	url := fmt.Sprintf("http://127.0.0.1:%d/", port)
+
+	var responseStatus int
+	var responseBody string
+	require.Eventually(t, func() bool {
+		client := &http.Client{Timeout: 100 * time.Millisecond}
+		resp, err := client.Get(url)
+		if err != nil {
+			return false
+		}
+		defer func() { _ = resp.Body.Close() }()
+		data, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			return false
+		}
+		responseStatus = resp.StatusCode
+		responseBody = string(data)
+		return resp.StatusCode == http.StatusOK
+	}, time.Second, 10*time.Millisecond)
+
+	assert.Equal(t, http.StatusOK, responseStatus)
+	assert.Equal(t, "ok", responseBody)
+
+	cleanupCtx, cleanupCancel := context.WithTimeout(
+		logger.WithContext(context.Background()),
+		time.Second,
+	)
+	defer cleanupCancel()
+	cleaner(cleanupCtx)
+
+	lifecycleCancel()
+
+	select {
+	case <-runnerDone:
+		// success
+	case <-time.After(time.Second):
+		t.Fatal("HTTP server runner did not stop")
+	}
+
+	assert.Contains(t, logBuf.String(), "Start serving")
+	assert.Contains(t, logBuf.String(), "Shutting down...")
+	assert.Contains(t, logBuf.String(), "Shutdown complete")
+	assert.NotContains(t, logBuf.String(), "Server closed with error")
 }
