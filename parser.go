@@ -97,8 +97,6 @@ func requestHandler(ctx *Context, tags *requestTags, parsed any, next Handler) {
 	logger.Trace().Object("response", ctx.Response()).Msg("Handler returned")
 }
 
-var serverCtxKey = reflect.TypeFor[requestTags]()
-
 //region requestTags
 
 type requestTags struct {
