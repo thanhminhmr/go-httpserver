@@ -9,12 +9,13 @@ package httpserver
 import "net/http"
 
 // responseWriterTracker wraps an [http.ResponseWriter] to record the first
-// status code passed to [http.ResponseWriter.WriteHeader] and to count the
-// bytes written. All writes are delegated to the underlying writer.
+// final status code (2xx-5xx) and to count the bytes written. All writes are
+// delegated to the underlying writer.
 //
-// The first call to [http.ResponseWriter.Write] that occurs without a prior
-// [http.ResponseWriter.WriteHeader] call is treated as status 200, matching
-// the behavior of [net/http].
+// Informational responses (1xx) are forwarded but do not commit a final
+// status. The first call to [http.ResponseWriter.Write] that occurs without a
+// prior final [http.ResponseWriter.WriteHeader] call is treated as status 200,
+// matching the behavior of [net/http].
 type responseWriterTracker struct {
 	http.ResponseWriter
 	status       int
@@ -26,6 +27,12 @@ func newResponseWriterTracker(w http.ResponseWriter) *responseWriterTracker {
 }
 
 func (w *responseWriterTracker) WriteHeader(status int) {
+	// Informational responses (1xx) do not commit a final status.
+	if status < 200 {
+		w.ResponseWriter.WriteHeader(status)
+		return
+	}
+	// Preserve the first committed final status (2xx-5xx).
 	if w.status == 0 {
 		w.status = status
 	}

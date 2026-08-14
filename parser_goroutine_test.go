@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -20,180 +21,186 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// ============ Goroutine: body close cancels in-flight reader ============
-//
-// In bindFullTextBody (parser.go), the binder runs in a separate goroutine.
-// Two paths can trigger a return before the binder finishes:
-//
-//  1. Timeout: after maxReadBodyDuration (5 seconds), request.Body.Close()
-//     is called, unblocking the binder's pending read.
-//  2. Context cancellation: request.Context().Done() fires, returning 408.
-//     The body is also closed via AddSuppressed(request.Body.Close()).
-//
-// In both cases, the goroutine leak is bounded: once the body closes, the
-// blocked read fails and the goroutine exits quickly.
+// ============================================================================
+// Test infrastructure: deterministic synchronization for body-binding paths
+// ============================================================================
 
-func TestGoroutine_BodyClose_CancelsInFlightRead(t *testing.T) {
-	pr, _ := io.Pipe()
+// blockingReadCloser is a test-only [io.ReadCloser] that blocks Reads until
+// Close is called. It signals readStarted the first time Read blocks so callers
+// can deterministically know the binder goroutine is parked on the body read,
+// then trigger the timeout or context-cancellation path without any sleeps.
+type blockingReadCloser struct {
+	readStartedOnce sync.Once
+	readStarted     chan struct{}
 
-	readDone := make(chan error, 1)
-	go func() {
-		_, err := io.ReadAll(pr)
-		readDone <- err
-	}()
+	closeOnce sync.Once
+	closed    chan struct{}
+}
 
-	time.Sleep(10 * time.Millisecond)
-
-	_ = pr.Close()
-
-	select {
-	case err := <-readDone:
-		assert.Error(t, err, "read should fail after body close")
-	case <-time.After(2 * time.Second):
-		t.Fatal("reader goroutine did not unblock after body close (goroutine leak)")
+func newBlockingReadCloser() *blockingReadCloser {
+	return &blockingReadCloser{
+		readStarted: make(chan struct{}),
+		closed:      make(chan struct{}),
 	}
 }
 
-// TestGoroutine_BindFullTextBody_TimeoutClosesBody exercises the full 5-second
-// timeout path. It is skipped in short mode.
-func TestGoroutine_BindFullTextBody_TimeoutClosesBody(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping 5-second timeout test in short mode")
-	}
+func (b *blockingReadCloser) Read(p []byte) (int, error) {
+	b.readStartedOnce.Do(func() { close(b.readStarted) })
+	<-b.closed
+	return 0, io.EOF
+}
 
-	pr, _ := io.Pipe()
+func (b *blockingReadCloser) Close() error {
+	b.closeOnce.Do(func() { close(b.closed) })
+	return nil
+}
+
+// binderResult captures the outcome of a [bindFullTextBodyWithTimeout] call so
+// worker goroutines can return errors and results to the test goroutine.
+type binderResult struct {
+	status int
+	err    error
+}
+
+// ============================================================================
+// Timeout path: binder exceeds the timeout, body is closed, goroutine exits
+// ============================================================================
+
+func TestBindFullTextBody_TimeoutClosesBodyAndBinderExits(t *testing.T) {
+	body := newBlockingReadCloser()
 	req := &http.Request{
 		Method:        http.MethodPost,
-		Body:          pr,
+		Body:          body,
 		ContentLength: 100,
 		Header:        http.Header{"Content-Type": {"application/json; charset=utf-8"}},
 	}
 
-	binderDone := make(chan error, 1)
+	binderDone := make(chan struct{})
 	binder := func(reader io.Reader, _ reflect.Value) (int, error) {
+		defer close(binderDone)
 		_, err := io.ReadAll(reader)
-		binderDone <- err
 		return http.StatusInternalServerError, err
 	}
 
-	contentTypeParams := map[string]string{"charset": "utf-8"}
-
+	const timeout = 50 * time.Millisecond
 	start := time.Now()
-	status, err := bindFullTextBody(req, contentTypeParams, reflect.Value{}, binder)
+	status, err := bindFullTextBodyWithTimeout(req, map[string]string{"charset": "utf-8"},
+		reflect.Value{}, binder, timeout)
 	elapsed := time.Since(start)
 
-	assert.Equal(t, http.StatusRequestTimeout, status, "expected timeout")
-	assert.Error(t, err, "expected timeout error")
-	assert.GreaterOrEqual(t, elapsed, 5*time.Second,
-		"should not return before maxReadBodyDuration")
+	assert.Equal(t, http.StatusRequestTimeout, status, "timeout should produce 408")
+	assert.Error(t, err)
+	assert.GreaterOrEqual(t, elapsed, timeout, "should wait at least the timeout")
+	assert.Less(t, elapsed, 5*time.Second, "should not wait the production 5s duration")
 
+	// Wait for the binder goroutine to exit: the production path closes the
+	// body which unblocks the pending Read.
 	select {
-	case binderErr := <-binderDone:
-		assert.Error(t, binderErr, "binder should fail after body close")
+	case <-binderDone:
 	case <-time.After(2 * time.Second):
 		t.Fatal("binder goroutine did not exit after body close (goroutine leak)")
 	}
 }
 
-// TestGoroutine_BindFullTextBody_ContextCancel_Returns408 verifies that when the
-// request context is cancelled (client disconnect), bindFullTextBody returns
-// 408 quickly without waiting for the 5-second timeout.
-func TestGoroutine_BindFullTextBody_ContextCancel_Returns408(t *testing.T) {
-	pr, _ := io.Pipe()
+// ============================================================================
+// Context cancellation: request context cancelled, body closed, binder exits
+// ============================================================================
+
+func TestBindFullTextBody_ContextCancel_Returns408AndClosesBody(t *testing.T) {
+	body := newBlockingReadCloser()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	req := &http.Request{
 		Method:        http.MethodPost,
-		Body:          pr,
+		Body:          body,
 		ContentLength: 100,
 		Header:        http.Header{"Content-Type": {"application/json; charset=utf-8"}},
 	}
 	req = req.WithContext(ctx)
 
-	contentTypeParams := map[string]string{"charset": "utf-8"}
+	binderDone := make(chan struct{})
 	binder := func(reader io.Reader, _ reflect.Value) (int, error) {
+		defer close(binderDone)
 		_, err := io.ReadAll(reader)
 		return http.StatusInternalServerError, err
 	}
 
-	resultCh := make(chan struct {
-		status int
-		err    error
-	}, 1)
+	resultCh := make(chan binderResult, 1)
 	go func() {
-		status, err := bindFullTextBody(req, contentTypeParams, reflect.Value{}, binder)
-		resultCh <- struct {
-			status int
-			err    error
-		}{status, err}
+		status, err := bindFullTextBodyWithTimeout(req, map[string]string{"charset": "utf-8"},
+			reflect.Value{}, binder, 30*time.Second)
+		resultCh <- binderResult{status: status, err: err}
 	}()
 
-	time.Sleep(50 * time.Millisecond)
+	// Wait deterministically for the binder goroutine to be parked on the body
+	// Read before cancelling the context.
+	<-body.readStarted
+
 	start := time.Now()
 	cancel()
 
 	select {
 	case result := <-resultCh:
-		assert.Equal(t, http.StatusRequestTimeout, result.status)
+		assert.Equal(t, http.StatusRequestTimeout, result.status, "cancel should produce 408")
 		assert.Error(t, result.err)
-		assert.Less(t, time.Since(start), time.Second,
-			"should return quickly after context cancel, not wait 5s")
+		assert.Less(t, time.Since(start), time.Second, "should return quickly after cancel")
 	case <-time.After(2 * time.Second):
 		t.Fatal("bindFullTextBody did not return after context cancel")
 	}
 
-	// In real usage the HTTP server closes body after handler returns.
-	// We simulate that here so the binder goroutine can exit.
-	_ = pr.Close()
-}
-
-// TestGoroutine_BindFullTextBody_ContextCancel_BodyClose_KillsBinder verifies that
-// after bindFullTextBody returns due to context cancellation, closing the
-// request body causes the binder goroutine to exit promptly.
-func TestGoroutine_BindFullTextBody_ContextCancel_BodyClose_KillsBinder(t *testing.T) {
-	pr, _ := io.Pipe()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	req := &http.Request{
-		Method:        http.MethodPost,
-		Body:          pr,
-		ContentLength: 100,
-		Header:        http.Header{"Content-Type": {"application/json; charset=utf-8"}},
-	}
-	req = req.WithContext(ctx)
-
-	contentTypeParams := map[string]string{"charset": "utf-8"}
-	binderDone := make(chan error, 1)
-	binder := func(reader io.Reader, _ reflect.Value) (int, error) {
-		_, err := io.ReadAll(reader)
-		binderDone <- err
-		return http.StatusInternalServerError, err
-	}
-
-	go func() {
-		_, _ = bindFullTextBody(req, contentTypeParams, reflect.Value{}, binder)
-	}()
-
-	time.Sleep(50 * time.Millisecond)
-	cancel()
-	time.Sleep(50 * time.Millisecond)
-
-	// Close body (simulating what HTTP server does after handler returns)
-	_ = pr.Close()
-
+	// Production path already closed the body. Verify binder goroutine exits.
 	select {
-	case err := <-binderDone:
-		assert.Error(t, err, "binder should fail after body close")
+	case <-binderDone:
 	case <-time.After(2 * time.Second):
 		t.Fatal("binder goroutine did not exit after body close (goroutine leak)")
 	}
 }
 
-// ============ Binder goroutine panic recovery ============
-//
-// When the binder goroutine panics (e.g. a user's UnmarshalText panics), the
-// defer exception.Recover inside the goroutine catches it and the parent
-// goroutine will re-panic if not timeout.
+// ============================================================================
+// Timeout vs cancellation race: both paths close the body cleanly
+// ============================================================================
+
+// TestBindFullTextBody_TimeoutPathDoesNotLeak_BodyCloseUnblocksBinder is the
+// equivalent of the legacy "BodyClose_KillsBinder" test but with deterministic
+// synchronization. It verifies that after the context-cancel path returns,
+// closing the body causes the binder goroutine to exit promptly.
+func TestBindFullTextBody_BodyCloseUnblocksBinderAfterContextCancel(t *testing.T) {
+	body := newBlockingReadCloser()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req := &http.Request{
+		Method:        http.MethodPost,
+		Body:          body,
+		ContentLength: 100,
+		Header:        http.Header{"Content-Type": {"application/json; charset=utf-8"}},
+	}
+	req = req.WithContext(ctx)
+
+	binderDone := make(chan struct{})
+	binder := func(reader io.Reader, _ reflect.Value) (int, error) {
+		defer close(binderDone)
+		_, err := io.ReadAll(reader)
+		return http.StatusInternalServerError, err
+	}
+
+	go func() {
+		_, _ = bindFullTextBodyWithTimeout(req, map[string]string{"charset": "utf-8"},
+			reflect.Value{}, binder, 30*time.Second)
+	}()
+
+	<-body.readStarted
+	cancel()
+
+	select {
+	case <-binderDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("binder goroutine did not exit after body close (goroutine leak)")
+	}
+}
+
+// ============================================================================
+// Binder goroutine panic propagation
+// ============================================================================
 
 type panicTextType string
 
@@ -201,7 +208,11 @@ func (p *panicTextType) UnmarshalText([]byte) error {
 	panic("coverage: binder panic")
 }
 
-func TestGoroutine_BinderPanic(t *testing.T) {
+// TestBindFullTextBody_BinderPanicPropagates verifies that when the binder
+// goroutine panics, the panic is re-raised in the caller goroutine. The test
+// uses a form binder whose UnmarshalText panics; the form binder runs inside
+// bindFullTextBody's goroutine via [tags.bindForm].
+func TestBindFullTextBody_BinderPanicPropagates(t *testing.T) {
 	require.Panics(t, func() {
 		type Req struct {
 			Value panicTextType `form:"value"`
@@ -212,6 +223,6 @@ func TestGoroutine_BinderPanic(t *testing.T) {
 			strings.NewReader("value=hello"))
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded; charset=utf-8")
 		req.ContentLength = int64(len("value=hello"))
-		asHTTPHandler(handler).ServeHTTP(rec, req)
+		asTestHTTPHandler(handler).ServeHTTP(rec, req)
 	})
 }

@@ -174,24 +174,6 @@ func TestCharset_USAscii_NopEncoding(t *testing.T) {
 	assert.Equal(t, "hello", captured.request.Data, "Data")
 }
 
-// TestUTF16EncodeDecode verifies our test helpers encode UTF-16 correctly.
-func TestUTF16EncodeDecode(t *testing.T) {
-	original := "héllo 世界"
-	utf16le := unicode.UTF16(unicode.LittleEndian, unicode.IgnoreBOM)
-	encoded, _, err := transform.Bytes(utf16le.NewEncoder(), []byte(original))
-	if err != nil {
-		t.Fatalf("encode failed: %v", err)
-	}
-	// Decode back
-	decoded, _, err := transform.Bytes(utf16le.NewDecoder(), encoded)
-	if err != nil {
-		t.Fatalf("decode failed: %v", err)
-	}
-	if string(decoded) != original {
-		t.Errorf("roundtrip failed: got %q, want %q", string(decoded), original)
-	}
-}
-
 // ============ short body edge cases (BOM peek) ============
 
 func TestCharset_OneByteBody_NoBOM_NoCharset(t *testing.T) {

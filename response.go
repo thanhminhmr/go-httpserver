@@ -59,9 +59,9 @@ func (c *Context) Response() Response { return Response{ctx: c} }
 // It clears the previous body and all response headers. The response is written
 // only after the outermost parser returns.
 //
-// NewResponse panics unless status is between 100 and 599.
+// NewResponse panics unless status is between 200 and 599.
 func (c *Context) NewResponse(status int) Response {
-	if status < 100 || status > 599 {
+	if status < 200 || status > 599 {
 		panic("BUG: invalid status")
 	}
 	c.status, c.body, c.marshaller = status, nil, marshallerIsDirect
@@ -145,6 +145,7 @@ func (c *Context) writeResponse() error {
 			c.writer.WriteHeader(c.status)
 			_, err = c.writer.Write(data)
 		} else {
+			clear(c.writer.Header())
 			c.writer.WriteHeader(http.StatusInternalServerError)
 		}
 		return err
@@ -165,6 +166,7 @@ func (c *Context) writeResponse() error {
 			c.writer.WriteHeader(c.status)
 			return body(c.writer)
 		}
+		clear(c.writer.Header())
 		c.writer.WriteHeader(http.StatusInternalServerError)
 		return exception.String("Response: unsupported body type")
 	}

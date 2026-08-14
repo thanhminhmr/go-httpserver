@@ -15,7 +15,6 @@ import (
 	"reflect"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -28,7 +27,7 @@ func TestError_NilResponse_Returns500(t *testing.T) {
 	handler := RequestParser(func(_ *Context, _ Req) {})
 	req, _ := http.NewRequest(http.MethodGet, "/", nil)
 	rec := httptest.NewRecorder()
-	asHTTPHandler(handler).ServeHTTP(rec, req)
+	asTestHTTPHandler(handler).ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 	assert.Empty(t, rec.Body.String())
 }
@@ -42,7 +41,7 @@ func TestError_MissingContentType_415(t *testing.T) {
 	req, _ := http.NewRequest(http.MethodPost, "/", body)
 	req.ContentLength = int64(len(`{"data":"hello"}`))
 	rec := httptest.NewRecorder()
-	asHTTPHandler(handler).ServeHTTP(rec, req)
+	asTestHTTPHandler(handler).ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusUnsupportedMediaType, rec.Code)
 	assert.Empty(t, rec.Body.String())
 }
@@ -57,7 +56,7 @@ func TestError_InvalidContentType_400(t *testing.T) {
 	req.Header.Set("Content-Type", "not a valid media type")
 	req.ContentLength = int64(len(`{"data":"hello"}`))
 	rec := httptest.NewRecorder()
-	asHTTPHandler(handler).ServeHTTP(rec, req)
+	asTestHTTPHandler(handler).ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Empty(t, rec.Body.String())
 }
@@ -82,7 +81,7 @@ func TestError_MissingContentLength_411(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	req.ContentLength = -1
 	rec := httptest.NewRecorder()
-	asHTTPHandler(handler).ServeHTTP(rec, req)
+	asTestHTTPHandler(handler).ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusLengthRequired, rec.Code)
 	assert.Empty(t, rec.Body.String())
 }
@@ -100,7 +99,7 @@ func TestError_BodyTooLarge_413(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	req.ContentLength = int64(len(largeBody))
 	rec := httptest.NewRecorder()
-	asHTTPHandler(handler).ServeHTTP(rec, req)
+	asTestHTTPHandler(handler).ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusRequestEntityTooLarge, rec.Code)
 	assert.Empty(t, rec.Body.String())
 }
@@ -114,36 +113,6 @@ func TestError_InvalidForm_400(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Empty(t, rec.Body.String())
 }
-
-func TestError_BodyTimeout_408(t *testing.T) {
-	type Req struct {
-		Data string `json:"data"`
-	}
-	handler := RequestParser(captureHandler[Req])
-	req, _ := http.NewRequest(http.MethodPost, "/", &slowReader{delay: maxReadBodyDuration + 2*time.Second})
-	req.Header.Set("Content-Type", "application/json")
-	req.ContentLength = 100
-	rec := httptest.NewRecorder()
-	start := time.Now()
-	asHTTPHandler(handler).ServeHTTP(rec, req)
-	elapsed := time.Since(start)
-	assert.Equal(t, http.StatusRequestTimeout, rec.Code)
-	assert.Empty(t, rec.Body.String())
-	if elapsed < maxReadBodyDuration {
-		t.Errorf("timeout occurred too quickly: %v (expected at least %v)", elapsed, maxReadBodyDuration)
-	}
-}
-
-type slowReader struct {
-	delay time.Duration
-}
-
-func (sr *slowReader) Read(_ []byte) (n int, err error) {
-	time.Sleep(sr.delay)
-	return 0, io.EOF
-}
-
-// ============ bind error paths (type coercion failures) ============
 
 func TestError_BindHeader_400(t *testing.T) {
 	type Req struct {

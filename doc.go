@@ -4,8 +4,8 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-// Package httpserver provides typed request parsing and response handling for
-// [chi].
+// Package httpserver provides typed request parsing and response handling on
+// top of the standard library [net/http] ServeMux.
 //
 // [RequestParser] and [MiddlewareParser] bind an HTTP request into a struct,
 // apply `default` values, validate the result, and call a typed handler.

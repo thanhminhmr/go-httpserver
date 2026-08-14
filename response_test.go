@@ -7,6 +7,7 @@
 package httpserver
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -15,11 +16,143 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
-// ============ Context.writeResponse (HTTP wire marshaling) ============
+// ============================================================================
+// Context.NewResponse: status boundaries and state reset
+// ============================================================================
 
-func TestResponse_Write_NilBody(t *testing.T) {
+// NewResponse must panic for statuses outside [200, 599] and accept everything
+// in that range. A response whose NewResponse was never called has Status()==0.
+func TestContext_NewResponse_StatusBoundaries(t *testing.T) {
+	t.Run("below_200_panics", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		assert.Panics(t, func() {
+			(&Context{writer: rec}).NewResponse(199)
+		})
+	})
+	t.Run("200_to_599_succeed", func(t *testing.T) {
+		for _, status := range []int{200, 201, 204, 301, 404, 500, 599} {
+			rec := httptest.NewRecorder()
+			assert.NotPanics(t, func() {
+				r := (&Context{writer: rec}).NewResponse(status)
+				assert.Equal(t, status, r.Status())
+			}, "status %d", status)
+		}
+	})
+	t.Run("above_599_panics", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		assert.Panics(t, func() {
+			(&Context{writer: rec}).NewResponse(600)
+		})
+	})
+}
+
+// Regression: a second NewResponse must clear headers/body/marshaller set by
+// an earlier NewResponse so handlers cannot accidentally inherit stale state.
+func TestContext_NewResponse_ClearsPreviousResponseState(t *testing.T) {
+	rec := httptest.NewRecorder()
+	ctx := &Context{writer: rec}
+
+	prev := ctx.NewResponse(http.StatusOK)
+	prev.Header().Set("X-Old", "value")
+	prev.JsonBody(map[string]string{"k": "v"}) // sets marshaller=JSON
+	require.Equal(t, "value", rec.Header().Get("X-Old"))
+	require.NotNil(t, ctx.body)
+	require.Equal(t, marshallerIsJson, ctx.marshaller)
+
+	ctx.NewResponse(http.StatusNoContent)
+	assert.Equal(t, http.StatusNoContent, ctx.status)
+	assert.Nil(t, ctx.body)
+	assert.Equal(t, marshallerIsDirect, ctx.marshaller)
+	assert.Empty(t, rec.Header(), "headers must be cleared by NewResponse")
+}
+
+// ============================================================================
+// Response handle: Status / Header / Body / Cookie
+// ============================================================================
+
+func TestResponse_StatusGetter(t *testing.T) {
+	rec := httptest.NewRecorder()
+	r := (&Context{writer: rec}).NewResponse(http.StatusTeapot)
+	assert.Equal(t, http.StatusTeapot, r.Status())
+}
+
+func TestResponse_HeaderGetter(t *testing.T) {
+	rec := httptest.NewRecorder()
+	r := (&Context{writer: rec}).NewResponse(http.StatusOK)
+	r.Header().Set("X-Test", "value")
+	assert.Equal(t, "value", r.Header().Get("X-Test"))
+}
+
+// Body() returns the configured body value, or nil on a fresh response.
+func TestResponse_Body_ReturnsConfiguredBody(t *testing.T) {
+	rec := httptest.NewRecorder()
+	ctx := &Context{writer: rec}
+	r := ctx.NewResponse(http.StatusOK)
+
+	require.Nil(t, r.Body(), "fresh response body must be nil")
+
+	r.StringBody("hello")
+	assert.Equal(t, "hello", r.Body())
+
+	data := []byte{1, 2, 3}
+	r.BytesBody(data)
+	assert.Equal(t, data, r.Body())
+}
+
+func TestResponse_CookieSetter(t *testing.T) {
+	rec := httptest.NewRecorder()
+	r := (&Context{writer: rec}).NewResponse(http.StatusOK)
+	r.Cookie(http.Cookie{Name: "session", Value: "abc"})
+	assert.Len(t, rec.Header().Values("Set-Cookie"), 1)
+}
+
+// ============================================================================
+// Context context.Context delegation (Deadline / Done / Err / Value)
+// ============================================================================
+
+func TestContext_Deadline_DelegatesToRequest(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	ctx := &Context{request: req, writer: rec}
+	dl, ok := ctx.Deadline()
+	assert.False(t, ok)
+	assert.True(t, dl.IsZero())
+}
+
+func TestContext_DoneAndErr_DelegateToRequest(t *testing.T) {
+	rootCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil).WithContext(rootCtx)
+	rec := httptest.NewRecorder()
+	ctx := &Context{request: req, writer: rec}
+
+	done := ctx.Done()
+	require.NotNil(t, done)
+	require.Nil(t, ctx.Err(), "Err before cancel should be nil")
+
+	cancel()
+	<-done
+	assert.ErrorIs(t, ctx.Err(), context.Canceled)
+}
+
+func TestContext_Value_DelegatesToRequest(t *testing.T) {
+	type ctxKey struct{}
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req = req.WithContext(context.WithValue(req.Context(), ctxKey{}, "stored"))
+	rec := httptest.NewRecorder()
+	ctx := &Context{request: req, writer: rec}
+	assert.Equal(t, "stored", ctx.Value(ctxKey{}))
+}
+
+// ============================================================================
+// Context.writeResponse body-type matrix
+// ============================================================================
+
+func TestContext_writeResponse_NilBody(t *testing.T) {
 	rec := httptest.NewRecorder()
 	ctx := &Context{writer: rec, status: http.StatusNoContent}
 	err := ctx.writeResponse()
@@ -29,7 +162,7 @@ func TestResponse_Write_NilBody(t *testing.T) {
 	assert.Empty(t, rec.Header().Get("Content-Type"))
 }
 
-func TestResponse_Write_BytesBody(t *testing.T) {
+func TestContext_writeResponse_BytesBody(t *testing.T) {
 	rec := httptest.NewRecorder()
 	data := []byte("raw bytes")
 	ctx := &Context{writer: rec}
@@ -41,7 +174,7 @@ func TestResponse_Write_BytesBody(t *testing.T) {
 	assert.Empty(t, rec.Header().Get("Content-Type"))
 }
 
-func TestResponse_Write_StringBody(t *testing.T) {
+func TestContext_writeResponse_StringBody(t *testing.T) {
 	rec := httptest.NewRecorder()
 	ctx := &Context{writer: rec}
 	ctx.NewResponse(http.StatusOK).StringBody("a string")
@@ -52,7 +185,7 @@ func TestResponse_Write_StringBody(t *testing.T) {
 	assert.Empty(t, rec.Header().Get("Content-Type"))
 }
 
-func TestResponse_Write_StreamBody(t *testing.T) {
+func TestContext_writeResponse_StreamBody(t *testing.T) {
 	rec := httptest.NewRecorder()
 	ctx := &Context{writer: rec}
 	ctx.NewResponse(http.StatusOK).StreamBody(func(w io.Writer) error {
@@ -66,7 +199,7 @@ func TestResponse_Write_StreamBody(t *testing.T) {
 	assert.Empty(t, rec.Header().Get("Content-Type"))
 }
 
-func TestResponse_Write_StreamBody_Error(t *testing.T) {
+func TestContext_writeResponse_StreamBody_Error(t *testing.T) {
 	rec := httptest.NewRecorder()
 	streamErr := errors.New("stream write failed")
 	ctx := &Context{writer: rec}
@@ -78,7 +211,7 @@ func TestResponse_Write_StreamBody_Error(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
-func TestResponse_Write_PlainTextBody(t *testing.T) {
+func TestContext_writeResponse_PlainTextBody(t *testing.T) {
 	rec := httptest.NewRecorder()
 	ctx := &Context{writer: rec}
 	ctx.NewResponse(http.StatusOK).PlainTextBody("hello plain")
@@ -89,7 +222,7 @@ func TestResponse_Write_PlainTextBody(t *testing.T) {
 	assert.Equal(t, "text/plain; charset=utf-8", rec.Header().Get("Content-Type"))
 }
 
-func TestResponse_Write_OctetsBody(t *testing.T) {
+func TestContext_writeResponse_OctetsBody(t *testing.T) {
 	rec := httptest.NewRecorder()
 	data := []byte{0x00, 0x01, 0x02, 0xFF}
 	ctx := &Context{writer: rec}
@@ -101,7 +234,7 @@ func TestResponse_Write_OctetsBody(t *testing.T) {
 	assert.Equal(t, "application/octet-stream", rec.Header().Get("Content-Type"))
 }
 
-func TestResponse_Write_JsonBody(t *testing.T) {
+func TestContext_writeResponse_JsonBody(t *testing.T) {
 	rec := httptest.NewRecorder()
 	type payload struct {
 		Name string `json:"name"`
@@ -119,19 +252,66 @@ func TestResponse_Write_JsonBody(t *testing.T) {
 	assert.Equal(t, p, result)
 }
 
-func TestResponse_Write_JsonBody_MarshalError(t *testing.T) {
+// ============================================================================
+// Context.writeResponse error paths
+// ============================================================================
+
+// Regression: JSON marshal failure must clear stale headers, write 500 and
+// leave the body empty. The header set just before writeResponse (after the
+// NewResponse clear) must be gone after the failure path runs.
+func TestContext_writeResponse_JsonMarshalError(t *testing.T) {
 	rec := httptest.NewRecorder()
 	ctx := &Context{writer: rec}
 	ctx.NewResponse(http.StatusOK).JsonBody(make(chan int))
+	ctx.writer.Header().Set("X-Added", "value")
 	err := ctx.writeResponse()
 	assert.Error(t, err)
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+	assert.Empty(t, rec.Header().Get("X-Added"))
+	assert.Empty(t, rec.Body.Bytes(), "marshal failure body must be empty")
 }
 
-func TestResponse_Write_UnknownBodyType(t *testing.T) {
+// Regression: unsupported body type must clear headers and write 500.
+func TestContext_writeResponse_UnknownBodyType(t *testing.T) {
 	rec := httptest.NewRecorder()
 	ctx := &Context{writer: rec, status: http.StatusOK, body: 12345}
+	ctx.writer.Header().Set("X-Added", "value")
 	err := ctx.writeResponse()
 	assert.Error(t, err)
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+	assert.Empty(t, rec.Header().Get("X-Added"))
 }
+
+// Body-write errors from the underlying ResponseWriter must propagate to the
+// caller of writeResponse.
+func TestContext_writeResponse_BodyWriteErrorPropagates(t *testing.T) {
+	fw := &failingResponseWriter{writeErr: errors.New("write failed")}
+	ctx := &Context{writer: fw}
+	ctx.NewResponse(http.StatusOK).BytesBody([]byte("data"))
+	err := ctx.writeResponse()
+	assert.ErrorIs(t, err, fw.writeErr)
+}
+
+// ============================================================================
+// helpers
+// ============================================================================
+
+// failingResponseWriter is a minimal http.ResponseWriter whose Write returns a
+// configured error. Header/WriteHeader operate normally so we can isolate the
+// body-write error path.
+type failingResponseWriter struct {
+	header   http.Header
+	status   int
+	writeErr error
+}
+
+func (f *failingResponseWriter) Header() http.Header {
+	if f.header == nil {
+		f.header = http.Header{}
+	}
+	return f.header
+}
+
+func (f *failingResponseWriter) Write(b []byte) (int, error) { return 0, f.writeErr }
+
+func (f *failingResponseWriter) WriteHeader(statusCode int) { f.status = statusCode }

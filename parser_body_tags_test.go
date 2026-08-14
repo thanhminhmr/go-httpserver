@@ -31,27 +31,30 @@ type formSingleStruct struct {
 	Age  int    `form:"age"`
 }
 
-func TestFormTag_SingleField_POST(t *testing.T) {
-	captured, rec := doRequest[formSingleStruct](t, captureHandler[formSingleStruct],
-		http.MethodPost, "/", withFormBody(url.Values{"name": {"alice"}, "age": {"30"}}))
-	assert.Equal(t, http.StatusOK, rec.Code)
-	assert.Equal(t, "alice", captured.request.Name, "Name")
-	assert.Equal(t, 30, captured.request.Age, "Age")
-}
-
-func TestFormTag_PUT(t *testing.T) {
-	captured, rec := doRequest[formSingleStruct](t, captureHandler[formSingleStruct],
-		http.MethodPut, "/", withFormBody(url.Values{"name": {"bob"}, "age": {"25"}}))
-	assert.Equal(t, http.StatusOK, rec.Code)
-	assert.Equal(t, "bob", captured.request.Name, "Name")
-	assert.Equal(t, 25, captured.request.Age, "Age")
-}
-
-func TestFormTag_PATCH(t *testing.T) {
-	captured, rec := doRequest[formSingleStruct](t, captureHandler[formSingleStruct],
-		http.MethodPatch, "/", withFormBody(url.Values{"name": {"carol"}}))
-	assert.Equal(t, http.StatusOK, rec.Code)
-	assert.Equal(t, "carol", captured.request.Name, "Name")
+// TestFormTag_BodyMethodMatrix exercises the form binder across the POST/PUT/
+// PATCH methods that share the body-parsing case in parser.go.
+func TestFormTag_BodyMethodMatrix(t *testing.T) {
+	cases := []struct {
+		name   string
+		method string
+		values url.Values
+		want   formSingleStruct
+	}{
+		{"POST", http.MethodPost, url.Values{"name": {"alice"}, "age": {"30"}}, formSingleStruct{Name: "alice", Age: 30}},
+		{"PUT", http.MethodPut, url.Values{"name": {"bob"}, "age": {"25"}}, formSingleStruct{Name: "bob", Age: 25}},
+		{"PATCH", http.MethodPatch, url.Values{"name": {"carol"}}, formSingleStruct{Name: "carol"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			captured, rec := doRequest[formSingleStruct](t, captureHandler[formSingleStruct],
+				tc.method, "/", withFormBody(tc.values))
+			require.Equal(t, http.StatusOK, rec.Code)
+			assert.Equal(t, tc.want.Name, captured.request.Name, "Name")
+			if tc.want.Age != 0 {
+				assert.Equal(t, tc.want.Age, captured.request.Age, "Age")
+			}
+		})
+	}
 }
 
 func TestFormTag_GET_IgnoresBody(t *testing.T) {
@@ -72,7 +75,7 @@ func TestFormTag_ContentLengthZero_SkipsBinding(t *testing.T) {
 	req, _ := http.NewRequest(http.MethodPost, "/", nil)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	rec := httptest.NewRecorder()
-	asHTTPHandler(RequestParser(func(ctx *Context, req formSingleStruct) {
+	asTestHTTPHandler(RequestParser(func(ctx *Context, req formSingleStruct) {
 		captured = req
 		ctx.NewResponse(http.StatusOK)
 	})).ServeHTTP(rec, req)
@@ -186,7 +189,7 @@ func TestJsonTag_ContentLengthZero_Skips(t *testing.T) {
 	req, _ := http.NewRequest(http.MethodPost, "/", nil)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
-	asHTTPHandler(RequestParser(func(ctx *Context, req jsonFieldStruct) {
+	asTestHTTPHandler(RequestParser(func(ctx *Context, req jsonFieldStruct) {
 		captured = req
 		ctx.NewResponse(http.StatusOK)
 	})).ServeHTTP(rec, req)
@@ -273,7 +276,7 @@ func TestMultipartTag_MissingBoundary_400(t *testing.T) {
 	req.Header.Set("Content-Type", "multipart/form-data")
 	req.ContentLength = int64(len("garbage"))
 	rec := httptest.NewRecorder()
-	asHTTPHandler(RequestParser(captureHandler[multipartStruct])).ServeHTTP(rec, req)
+	asTestHTTPHandler(RequestParser(captureHandler[multipartStruct])).ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
@@ -456,53 +459,112 @@ func TestBodyTag_BodyReadable(t *testing.T) {
 }
 
 // ============ method variation tests ============
+//
+// POST/PUT/PATCH/DELETE share the same body-parsing code path (parser.go:
+// `case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete`).
+// The matrix below covers the four methods for both the form and JSON binders.
 
-func TestJsonTag_PUT_ParsesBody(t *testing.T) {
-	captured, rec := doRequest[jsonSimpleStruct](t, captureHandler[jsonSimpleStruct],
-		http.MethodPut, "/", withJSONBody(map[string]any{"name": "put-data", "age": 25}))
-	assert.Equal(t, http.StatusOK, rec.Code)
-	assert.Equal(t, "put-data", captured.request.Name, "Name")
-	assert.Equal(t, 25, captured.request.Age, "Age")
+func TestJsonTag_BodyMethodMatrix(t *testing.T) {
+	cases := []struct {
+		name   string
+		method string
+		body   map[string]any
+		want   jsonSimpleStruct
+	}{
+		{"PUT", http.MethodPut, map[string]any{"name": "put-data", "age": 25}, jsonSimpleStruct{Name: "put-data", Age: 25}},
+		{"PATCH", http.MethodPatch, map[string]any{"name": "patch-data", "age": 35}, jsonSimpleStruct{Name: "patch-data", Age: 35}},
+		{"DELETE", http.MethodDelete, map[string]any{"name": "delete-data", "age": 25}, jsonSimpleStruct{Name: "delete-data", Age: 25}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			captured, rec := doRequest[jsonSimpleStruct](t, captureHandler[jsonSimpleStruct],
+				tc.method, "/", withJSONBody(tc.body))
+			require.Equal(t, http.StatusOK, rec.Code)
+			assert.Equal(t, tc.want, captured.request)
+		})
+	}
 }
 
-func TestJsonTag_PATCH_ParsesBody(t *testing.T) {
-	captured, rec := doRequest[jsonSimpleStruct](t, captureHandler[jsonSimpleStruct],
-		http.MethodPatch, "/", withJSONBody(map[string]any{"name": "patch-data", "age": 35}))
-	assert.Equal(t, http.StatusOK, rec.Code)
-	assert.Equal(t, "patch-data", captured.request.Name, "Name")
-	assert.Equal(t, 35, captured.request.Age, "Age")
+// ============ JSON trailing-content contract ============
+
+// These tests lock in the contract for bindJson: exactly one JSON value may be
+// present in the body. Any trailing content—including whitespace—must be
+// rejected with a 400 status. Both the whole-body json:"" path and the
+// named-field json:"name" path are covered.
+
+func TestJsonTag_TrailingContent(t *testing.T) {
+	type namedStruct struct {
+		Name string `json:"name"`
+	}
+	type wholeBodyStruct struct {
+		Data jsonSimpleStruct `json:""`
+	}
+
+	cases := []struct {
+		name      string
+		body      []byte
+		wantCode  int
+		wantName  string
+		wantWhole bool
+	}{
+		// no trailing bytes
+		{"named_no_trailing", []byte(`{"name":"a"}`), http.StatusOK, "a", false},
+		{"whole_no_trailing", []byte(`{"name":"b","age":1}`), http.StatusOK, "b", true},
+		// any trailing byte—including whitespace—must be rejected
+		{"named_trailing_space", []byte(`{"name":"a"} `), http.StatusBadRequest, "", false},
+		{"named_trailing_newline", []byte(`{"name":"a"}` + "\n"), http.StatusBadRequest, "", false},
+		{"whole_trailing_space", []byte(`{"name":"b","age":1} `), http.StatusBadRequest, "", true},
+		{"whole_trailing_newline", []byte(`{"name":"b","age":1}` + "\n"), http.StatusBadRequest, "", true},
+		// a second JSON value must be rejected
+		{"named_second_value", []byte(`{"name":"a"}{"name":"b"}`), http.StatusBadRequest, "", false},
+		{"whole_second_value", []byte(`{"name":"b","age":1}{"name":"c","age":2}`), http.StatusBadRequest, "", false},
+		// non-whitespace garbage after a valid value must be rejected
+		{"named_trailing_garbage", []byte(`{"name":"a"} garbage`), http.StatusBadRequest, "", false},
+		{"whole_trailing_garbage", []byte(`{"name":"b","age":1} garbage`), http.StatusBadRequest, "", false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.wantWhole {
+				captured, rec := doRequest[wholeBodyStruct](t, captureHandler[wholeBodyStruct],
+					http.MethodPost, "/", withRawBody("application/json", tc.body))
+				assert.Equal(t, tc.wantCode, rec.Code)
+				if tc.wantCode == http.StatusOK {
+					assert.Equal(t, tc.wantName, captured.request.Data.Name, "Data.Name")
+				}
+			} else {
+				captured, rec := doRequest[namedStruct](t, captureHandler[namedStruct],
+					http.MethodPost, "/", withRawBody("application/json", tc.body))
+				assert.Equal(t, tc.wantCode, rec.Code)
+				if tc.wantCode == http.StatusOK {
+					assert.Equal(t, tc.wantName, captured.request.Name, "Name")
+				}
+			}
+		})
+	}
 }
 
-func TestJsonTag_DELETE_ParsesBody(t *testing.T) {
-	captured, rec := doRequest[jsonSimpleStruct](t, captureHandler[jsonSimpleStruct],
-		http.MethodDelete, "/", withJSONBody(map[string]any{"name": "delete-data", "age": 25}))
-	assert.Equal(t, http.StatusOK, rec.Code)
-	assert.Equal(t, "delete-data", captured.request.Name, "Name")
-	assert.Equal(t, 25, captured.request.Age, "Age")
-}
-
-func TestBodyTag_PUT_BindsRawBody(t *testing.T) {
-	captured, rec := doRequest[bodyStruct](t, captureHandler[bodyStruct],
-		http.MethodPut, "/", withRawBody("text/plain", []byte("put body")))
-	assert.Equal(t, http.StatusOK, rec.Code)
-	data, _ := io.ReadAll(captured.request.Body)
-	assert.Equal(t, "put body", string(data), "Body")
-}
-
-func TestBodyTag_PATCH_BindsRawBody(t *testing.T) {
-	captured, rec := doRequest[bodyStruct](t, captureHandler[bodyStruct],
-		http.MethodPatch, "/", withRawBody("text/plain", []byte("patch body")))
-	assert.Equal(t, http.StatusOK, rec.Code)
-	data, _ := io.ReadAll(captured.request.Body)
-	assert.Equal(t, "patch body", string(data), "Body")
-}
-
-func TestBodyTag_DELETE_BindsRawBody(t *testing.T) {
-	captured, rec := doRequest[bodyStruct](t, captureHandler[bodyStruct],
-		http.MethodDelete, "/", withRawBody("text/plain", []byte("delete body")))
-	assert.Equal(t, http.StatusOK, rec.Code)
-	data, _ := io.ReadAll(captured.request.Body)
-	assert.Equal(t, "delete body", string(data), "Body")
+// TestBodyTag_BodyMethodMatrix exercises the raw-body binder across the PUT/
+// PATCH/DELETE methods that share the body-parsing case in parser.go.
+func TestBodyTag_BodyMethodMatrix(t *testing.T) {
+	cases := []struct {
+		name   string
+		method string
+		body   string
+	}{
+		{"PUT", http.MethodPut, "put body"},
+		{"PATCH", http.MethodPatch, "patch body"},
+		{"DELETE", http.MethodDelete, "delete body"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			captured, rec := doRequest[bodyStruct](t, captureHandler[bodyStruct],
+				tc.method, "/", withRawBody("text/plain", []byte(tc.body)))
+			require.Equal(t, http.StatusOK, rec.Code)
+			data, _ := io.ReadAll(captured.request.Body)
+			assert.Equal(t, tc.body, string(data), "Body")
+		})
+	}
 }
 
 // ============ body tag content-length zero ============

@@ -8,54 +8,120 @@ package httpserver
 
 import (
 	"net/http"
-	"net/http/httptest"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 )
 
-// Tests for concurrent request handling: parallel requests through both the
-// standard handler and the chi router.
+// concurrencyResult captures the outcome of a single concurrent worker so the
+// main test goroutine can run all assertions.
+type concurrencyResult struct {
+	index  int
+	status int
+	body   string
+}
 
-func TestConcurrency_ParallelRequests(t *testing.T) {
+// TestConcurrency_SharedRouter_PerRequestIsolation proves that a single shared
+// Router dispatches concurrent requests without cross-talk. Each worker sends a
+// unique query value and the response body must echo back exactly that worker's
+// own value (status-only assertions would miss data races in the parser cache).
+func TestConcurrency_SharedRouter_PerRequestIsolation(t *testing.T) {
 	type Req struct {
 		Name string `query:"name" validate:"required"`
 	}
-	handler := asHTTPHandler(RequestParser(captureHandler[Req]))
-	const n = 100
+	router := newTestRouter()
+	router.Handle("GET /", RequestParser(func(ctx *Context, req Req) {
+		ctx.NewResponse(http.StatusOK).StringBody(req.Name)
+	}))
+
+	const n = 200
+	start := make(chan struct{})
 	var wg sync.WaitGroup
 	wg.Add(n)
+	results := make(chan concurrencyResult, n)
 	for i := range n {
 		go func(idx int) {
 			defer wg.Done()
-			req, _ := http.NewRequest(http.MethodGet, "/?name=user", nil)
-			req.URL.RawQuery = "name=user" + strconv.Itoa(idx)
-			rec := httptest.NewRecorder()
-			handler.ServeHTTP(rec, req)
-			if rec.Code != http.StatusOK {
-				t.Errorf("request %d: status = %d, want %d", idx, rec.Code, http.StatusOK)
+			<-start
+			target := "/?name=user" + strconv.Itoa(idx)
+			rec := doRouterRequest(router, http.MethodGet, target)
+			results <- concurrencyResult{
+				index:  idx,
+				status: rec.Code,
+				body:   rec.Body.String(),
 			}
 		}(i)
 	}
+	close(start)
 	wg.Wait()
+	close(results)
+
+	bodies := make(map[int]string, n)
+	statuses := make(map[int]int, n)
+	for r := range results {
+		bodies[r.index] = r.body
+		statuses[r.index] = r.status
+	}
+	for i := range n {
+		assert.Equal(t, http.StatusOK, statuses[i], "worker %d status", i)
+		expected := "user" + strconv.Itoa(i)
+		assert.Equal(t, expected, bodies[i], "worker %d body", i)
+	}
 }
 
-func TestConcurrency_ChiRouter(t *testing.T) {
+// TestConcurrency_SharedRouter_WithMiddleware race-tests the dispatcher with
+// middleware attached. The middleware increments a shared atomic counter to
+// prove every request traverses the chain; the body still echoes the unique
+// per-worker value.
+func TestConcurrency_SharedRouter_WithMiddleware(t *testing.T) {
 	type Req struct {
-		ID string `url:"id" validate:"required"`
+		ID string `query:"id" validate:"required"`
 	}
-	const n = 50
+	router := newTestRouter()
+	var mwHits atomic.Int64
+	mw := func(ctx *Context, next func()) {
+		mwHits.Add(1)
+		next()
+	}
+	router.Group(mw).Handle("GET /", RequestParser(func(ctx *Context, req Req) {
+		ctx.NewResponse(http.StatusOK).StringBody(req.ID)
+	}))
+
+	const n = 200
+	start := make(chan struct{})
 	var wg sync.WaitGroup
 	wg.Add(n)
+	results := make(chan concurrencyResult, n)
 	for i := range n {
 		go func(idx int) {
 			defer wg.Done()
-			target := "/" + strconv.Itoa(idx)
-			_, rec := doServeMuxRequest[Req](t, http.MethodGet, "/{id}", target, captureHandler[Req])
-			if rec.Code != http.StatusOK {
-				t.Errorf("request %d: status = %d, want %d", idx, rec.Code, http.StatusOK)
+			<-start
+			target := "/?id=req" + strconv.Itoa(idx)
+			rec := doRouterRequest(router, http.MethodGet, target)
+			results <- concurrencyResult{
+				index:  idx,
+				status: rec.Code,
+				body:   rec.Body.String(),
 			}
 		}(i)
 	}
+	close(start)
 	wg.Wait()
+	close(results)
+
+	assert.Equal(t, int64(n), mwHits.Load(), "middleware should run once per request")
+	bodies := make(map[int]string, n)
+	statuses := make(map[int]int, n)
+	for r := range results {
+		bodies[r.index] = r.body
+		statuses[r.index] = r.status
+	}
+	for i := range n {
+		assert.Equal(t, http.StatusOK, statuses[i], "worker %d status", i)
+		expected := "req" + strconv.Itoa(i)
+		assert.Equal(t, expected, bodies[i], "worker %d body", i)
+	}
 }

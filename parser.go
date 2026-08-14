@@ -28,7 +28,7 @@ import (
 // response through ctx, usually with [Context.NewResponse].
 type RequestHandler[Request any] = func(ctx *Context, request Request)
 
-// RequestParser converts a typed [RequestHandler] into an [http.HandlerFunc].
+// RequestParser converts a typed [RequestHandler] into a [Handler].
 //
 // Request must be a non-pointer struct. Its defaults and binding-tag layout are
 // checked when RequestParser is called; invalid definitions panic. Each request
@@ -59,9 +59,9 @@ type MiddlewareHandler[Request any] = func(ctx *Context, request Request, next f
 // cannot be parsed again downstream. Direct writes by ordinary net/http handlers
 // bypass the shared response state.
 //
-// A parse or validation failure stops the chain and writes the error response
-// immediately. Otherwise, the outermost parser writes the configured response
-// after the chain returns.
+// A parse or validation failure updates the shared [Context] response state and
+// stops the chain; the response itself is written afterward by [Router.Handle]'s
+// dispatcher.
 func MiddlewareParser[Request any](handler MiddlewareHandler[Request]) Middleware {
 	tags := createTags(reflect.TypeFor[Request]())
 	return func(ctx *Context, next func()) {
@@ -349,6 +349,9 @@ func (tags *requestTags) parse(request *http.Request, parsed reflect.Value) (sta
 		}
 	}
 	// parse and bind body
+	if tags.flags&(tagForm|tagJson|tagMultipart|tagBody) == 0 {
+		return
+	}
 	switch request.Method {
 	case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
 		// check for empty request
@@ -390,6 +393,14 @@ func (tags *requestTags) parse(request *http.Request, parsed reflect.Value) (sta
 
 func bindFullTextBody(request *http.Request, contentTypeParameters map[string]string, parsed reflect.Value,
 	binder func(reader io.Reader, parsed reflect.Value) (int, error)) (int, error) {
+	return bindFullTextBodyWithTimeout(request, contentTypeParameters, parsed, binder, maxReadBodyDuration)
+}
+
+// bindFullTextBodyWithTimeout is the testable core of [bindFullTextBody]. It
+// accepts an explicit timeout so tests can exercise the timeout/cancel paths
+// without waiting for the production [maxReadBodyDuration].
+func bindFullTextBodyWithTimeout(request *http.Request, contentTypeParameters map[string]string, parsed reflect.Value,
+	binder func(reader io.Reader, parsed reflect.Value) (int, error), timeout time.Duration) (int, error) {
 	if request.ContentLength < 0 {
 		return http.StatusLengthRequired, exception.String("HttpServer: Content-Length is required but missing")
 	} else if request.ContentLength > maxBodyLength {
@@ -411,6 +422,8 @@ func bindFullTextBody(request *http.Request, contentTypeParameters map[string]st
 			done <- resultValue{status: status, err: err}
 		}(binder, done)
 		// set time limit for binder
+		timer := time.NewTimer(timeout)
+		defer timer.Stop()
 		select {
 		case result := <-done:
 			// re-panic recovered value
@@ -421,7 +434,7 @@ func bindFullTextBody(request *http.Request, contentTypeParameters map[string]st
 		case <-request.Context().Done():
 			return http.StatusRequestTimeout,
 				exception.String("HttpServer: Client diconnected").AddSuppressed(request.Body.Close())
-		case <-time.After(maxReadBodyDuration):
+		case <-timer.C:
 			return http.StatusRequestTimeout,
 				exception.String("HttpServer: Bind body timed out").AddSuppressed(request.Body.Close())
 		}
@@ -525,8 +538,9 @@ func (tags *requestTags) bindJson(reader io.Reader, parsed reflect.Value) (int, 
 	if err := decoder.Decode(target); err != nil {
 		return http.StatusBadRequest, exception.String("HttpServer: Decode json body failed").AddCause(err)
 	}
-	// check for trailing data
-	if count, err := io.CopyN(io.Discard, reader, 1); count > 0 || err != nil && err != io.EOF {
+	// the body must contain exactly one JSON value without any trailing bytes
+	nextReader := io.MultiReader(decoder.Buffered(), reader)
+	if count, err := io.CopyN(io.Discard, nextReader, 1); count > 0 || err != nil && err != io.EOF {
 		return http.StatusBadRequest, exception.String("HttpServer: Decode json body failed").AddCause(err)
 	}
 	// bind json body

@@ -32,10 +32,11 @@ type Router struct {
 }
 
 func (r Router) Group(middlewares ...Middleware) Router {
-	if len(r.middlewares) > 0 {
-		middlewares = append(append([]Middleware(nil), r.middlewares...), middlewares...)
+	return Router{
+		serveMux:    r.serveMux,
+		logger:      r.logger,
+		middlewares: append(append([]Middleware(nil), r.middlewares...), middlewares...),
 	}
-	return Router{serveMux: r.serveMux, logger: r.logger, middlewares: middlewares}
 }
 
 func (r Router) Handle(pattern string, handler Handler) {

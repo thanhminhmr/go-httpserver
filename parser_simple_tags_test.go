@@ -290,7 +290,7 @@ type defaultSliceStruct struct {
 func TestDefaultTag_NoAliasing_BetweenRequests(t *testing.T) {
 	var secondRequestItems sliceDefaultType
 	callCount := 0
-	handler := asHTTPHandler(RequestParser(func(ctx *Context, req defaultSliceStruct) {
+	handler := asTestHTTPHandler(RequestParser(func(ctx *Context, req defaultSliceStruct) {
 		callCount++
 		if callCount == 1 {
 			req.Items[0] = "MUTATED"
@@ -649,7 +649,7 @@ type urlSingleStruct struct {
 	ID string `url:"id"`
 }
 
-func TestUrlTag_SingleField_ChiRouteParam(t *testing.T) {
+func TestUrlTag_SingleRouteParameter(t *testing.T) {
 	captured, rec := doServeMuxRequest[urlSingleStruct](t,
 		http.MethodGet, "/users/{id}", "/users/42",
 		captureHandler[urlSingleStruct])

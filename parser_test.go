@@ -16,6 +16,8 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+
+	"github.com/rs/zerolog"
 )
 
 // This file contains shared test infrastructure (request builders, setters, and
@@ -37,10 +39,11 @@ func captureHandler[T any](ctx *Context, _ T) {
 
 type RequestSetter func(*http.Request)
 
-// asHTTPHandler adapts a [Handler] into an [http.HandlerFunc] for tests. It
-// creates a [Context], runs the handler, defaults to 500 when no response was
-// configured, and writes the response. This mirrors what [Router.Handle] does.
-func asHTTPHandler(handler Handler) http.HandlerFunc {
+// asTestHTTPHandler adapts a [Handler] into an [http.HandlerFunc] for the
+// narrow parser/response unit tests that need to exercise [Context] lifecycle
+// without involving [Router.Handle]. It is NOT equivalent coverage for
+// [Router.Handle] — see [newTestRouter] / [doRouterRequest] for that.
+func asTestHTTPHandler(handler Handler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := &Context{request: r, writer: w}
 		handler(ctx)
@@ -61,7 +64,7 @@ func doRequest[T any](t *testing.T, handler RequestHandler[T], method, target st
 		setter(req)
 	}
 	captured := &capturedRequest[T]{}
-	wrappedHandler := asHTTPHandler(RequestParser(func(ctx *Context, req T) {
+	wrappedHandler := asTestHTTPHandler(RequestParser(func(ctx *Context, req T) {
 		captured.ctx = ctx
 		captured.request = req
 		handler(ctx, req)
@@ -82,7 +85,7 @@ func doServeMuxRequest[T any](t *testing.T, method, pattern, target string, hand
 	}
 	captured := &capturedRequest[T]{}
 	mux := http.NewServeMux()
-	mux.Handle(method+" "+pattern, asHTTPHandler(RequestParser(func(ctx *Context, req T) {
+	mux.Handle(method+" "+pattern, asTestHTTPHandler(RequestParser(func(ctx *Context, req T) {
 		captured.ctx = ctx
 		captured.request = req
 		handler(ctx, req)
@@ -112,10 +115,11 @@ func withQuery(query string) RequestSetter {
 
 func withJSONBody(body any) RequestSetter {
 	return func(req *http.Request) {
-		buf := &bytes.Buffer{}
-		if err := json.NewEncoder(buf).Encode(body); err != nil {
+		data, err := json.Marshal(body)
+		if err != nil {
 			panic(err)
 		}
+		buf := bytes.NewBuffer(data)
 		req.Body = io.NopCloser(buf)
 		req.Header.Set("Content-Type", "application/json; charset=utf-8")
 		req.ContentLength = int64(buf.Len())
@@ -152,4 +156,30 @@ func withMultipartBody(t *testing.T, buildForm func(*multipart.Writer)) RequestS
 		req.Header.Set("Content-Type", writer.FormDataContentType())
 		req.ContentLength = int64(body.Len())
 	}
+}
+
+// newTestRouter returns a [Router] backed by a fresh [http.ServeMux] and a
+// disabled [zerolog.Logger]. Use [doRouterRequest] to dispatch a request
+// through the real ServeMux after registering handlers via [Router.Handle] or
+// [Router.Group].Handle.
+func newTestRouter() Router {
+	serveMux := http.NewServeMux()
+	logger := zerolog.Nop()
+	return Router{serveMux: serveMux, logger: &logger}
+}
+
+// doRouterRequest dispatches method/target (after applying setters) through r's
+// ServeMux and returns the recorded response. The caller must register matching
+// handlers beforehand; this helper only drives the real ServeMux.
+func doRouterRequest(r Router, method, target string, setters ...RequestSetter) *httptest.ResponseRecorder {
+	req, err := http.NewRequest(method, target, nil)
+	if err != nil {
+		panic(err)
+	}
+	for _, setter := range setters {
+		setter(req)
+	}
+	rec := httptest.NewRecorder()
+	r.serveMux.ServeHTTP(rec, req)
+	return rec
 }

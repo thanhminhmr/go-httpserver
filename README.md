@@ -90,14 +90,15 @@ Core of the framework. Defines the binding contract via struct tags and produces
 - `(*requestTags).checkRecursively` — walks the struct (including embedded anonymous structs), enforces the "at most one
   empty-tag field" rule per binding source, and records the field index path.
 - `(*requestTags).parse(request, parsed) (status, err)` — orchestrates binding in order: header, cookie, query, url. For
-  `POST`/`PUT`/`PATCH` with a body, selects the binder based on `Content-Type`: form
+  `POST`/`PUT`/`PATCH`/`DELETE` with a body, selects the binder based on `Content-Type`: form
   (`application/x-www-form-urlencoded`), JSON (`application/json`), multipart (`multipart/form-data`), or raw `body`.
 - `(*requestTags).bindHeader` — populates either the `http.Header` field (empty `header` tag) or calls
   `common.BindStructWithTag("header", ...)`.
 - `(*requestTags).bindCookie` — collapses `request.Cookies()` into a `KeyValues` map and binds.
 - `(*requestTags).bindQuery` — binds `request.URL.Query()` via the empty `query:""` field.
-- `(*requestTags).bindUrl` — reads `request.PathValue` for each wildcard in `request.Pattern`, builds a `KeyValue`, and
-  binds via the `url:""` field.
+- `(*requestTags).bindUrl` — reads URL parameters via the unsafe `getPathValues` accessor (see
+  [`request_unsafe.go`](./request_unsafe.go)), which reaches into `net/http` internals to extract the wildcard matches
+  recorded by `http.ServeMux`. This is not `request.PathValue` iteration.
 - `(*requestTags).bindForm` — reads the body, parses it as a URL-encoded form, and binds.
 - `(*requestTags).bindJson` — decodes the JSON body either into the field at `jsonFieldIndex` or into a generic
   `map[string]any` for tag-based binding.
@@ -127,7 +128,7 @@ Core of the framework. Defines the binding contract via struct tags and produces
 | `json:"<Name>"`        | n/a                  | Bind a field from a JSON object body.             |
 | `json:""`              | any                  | Decode the whole JSON body into this field.       |
 | `multipart:""`         | `*multipart.Reader`  | Expose the body as a multipart reader.            |
-| `body:"<Type>;<Type>"` | `io.ReadCloser`      | Bind the raw body for the listed Content-Types.   |
+| `body:"<Type> <Type>"` | `io.ReadCloser`      | Bind the raw body for the listed Content-Types.   |
 | `body:""`              | `io.ReadCloser`      | Bind the raw body when no other body binder ran.  |
 | `default:"<value>"`    | any                  | Applied before parsing for fields with a default. |
 
@@ -159,13 +160,15 @@ Core of the framework. Defines the binding contract via struct tags and produces
 
 ## tracker.go
 
-`responseWriterTracker` wraps an `http.ResponseWriter` to record the first status code passed to `WriteHeader` and to
-count the bytes written. All writes are delegated to the underlying writer.
+`responseWriterTracker` wraps an `http.ResponseWriter` to record the first final status code (2xx–5xx) passed to
+`WriteHeader` and to count the bytes written. Informational responses (1xx) are forwarded but do not commit a final
+status. All writes are delegated to the underlying writer.
 
 - `responseWriterTracker` — `struct { http.ResponseWriter; status int; bytesWritten int }`.
 - `newResponseWriterTracker(w http.ResponseWriter)` — constructs a `responseWriterTracker`.
-- `(*responseWriterTracker).WriteHeader(status int)` — records the first status passed and delegates to the underlying
-  writer.
+- `(*responseWriterTracker).WriteHeader(status int)` — for status `< 200`, forwards immediately without recording it.
+  For status `>= 200`, records it only if no final status was recorded yet (first wins, repeated calls preserve the
+  first), then delegates to the underlying writer.
 - `(*responseWriterTracker).Write(b []byte) (int, error)` — sets status to `http.StatusOK` if no status was set, then
   delegates and counts bytes written.
 - `(*responseWriterTracker).Status() int` — returns the recorded status code, or 0 if `WriteHeader` has not been called
