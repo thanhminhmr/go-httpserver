@@ -8,6 +8,7 @@ package httpserver
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -189,4 +190,38 @@ type errorReader struct{}
 
 func (errorReader) Read([]byte) (int, error) {
 	return 0, io.ErrUnexpectedEOF
+}
+
+// ============ defensive ApplyDefaults failure ============
+
+// failingDefault is a test-only type implementing [encoding.TextUnmarshaler]
+// whose UnmarshalText always fails. Used to exercise the defensive
+// `common.ApplyDefaults` error branch in [requestHandler] without disturbing
+// parser-cache state.
+type failingDefault struct {
+	value string
+}
+
+func (f *failingDefault) UnmarshalText(text []byte) error {
+	f.value = string(text)
+	return errors.New("default failed")
+}
+
+func TestRequestHandler_ApplyDefaultsError_Produces500(t *testing.T) {
+	type Req struct {
+		Field failingDefault `default:"anything"`
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	ctx := &Context{request: req, writer: rec}
+
+	var parsed Req
+	nextCalled := false
+	requestHandler(ctx, &requestTags{}, &parsed, func(ctx *Context) {
+		nextCalled = true
+	})
+
+	assert.Equal(t, http.StatusInternalServerError, ctx.status)
+	assert.False(t, nextCalled, "next must not be called when ApplyDefaults fails")
 }

@@ -8,8 +8,11 @@ package httpserver
 
 import (
 	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 )
 
 func TestHTTPRequestUnsafeLayout(t *testing.T) {
@@ -166,4 +169,14 @@ func assertStructLayout(
 			)
 		}
 	}
+}
+
+// TestGetPathValues_UnmatchedRequest_ReturnsNil exercises the
+// `request.pat == nil` branch in [getPathValues]: a request that has not been
+// dispatched through a [http.ServeMux] has no matched pattern, so the result
+// must be nil.
+func TestGetPathValues_UnmatchedRequest_ReturnsNil(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	values := getPathValues(req)
+	assert.Nil(t, values)
 }

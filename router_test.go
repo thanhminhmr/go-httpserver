@@ -7,9 +7,14 @@
 package httpserver
 
 import (
+	"bytes"
+	"errors"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -261,4 +266,32 @@ func TestRouter_IndependentRoutes(t *testing.T) {
 	assert.Equal(t, "a", recA.Body.String())
 	assert.Equal(t, http.StatusOK, recB.Code)
 	assert.Equal(t, "b", recB.Body.String())
+}
+
+// TestRouter_Handle_WriteResponseError_LogsFailure exercises the
+// `ctx.writeResponse()` error path in [Router.Handle]: a handler that returns a
+// failing [Response.StreamBody] must produce a 200 (status already committed by
+// StreamBody), must not panic, and the failure must be logged through zerolog.
+func TestRouter_Handle_WriteResponseError_LogsFailure(t *testing.T) {
+	var logBuf bytes.Buffer
+	logger := zerolog.New(&logBuf)
+
+	router := Router{serveMux: http.NewServeMux(), logger: &logger}
+	streamErr := errors.New("stream failed")
+	router.Handle("GET /", func(ctx *Context) {
+		ctx.NewResponse(http.StatusOK).StreamBody(func(io.Writer) error {
+			return streamErr
+		})
+	})
+
+	req, err := http.NewRequest(http.MethodGet, "/", nil)
+	require.NoError(t, err)
+	req = req.WithContext(logger.WithContext(req.Context()))
+
+	rec := httptest.NewRecorder()
+	assert.NotPanics(t, func() { router.serveMux.ServeHTTP(rec, req) })
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, logBuf.String(), "Failed to write response")
+	assert.Contains(t, logBuf.String(), "stream failed")
 }

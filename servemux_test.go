@@ -54,3 +54,18 @@ func TestServeMux_EmptyUrlTag_CollectsAllNamedParameters(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, KeyValue{"userId": "u123", "postId": "p456"}, captured.request.Params)
 }
+
+// TestServeMux_NoWildcardPattern_LeavesURLFieldZero exercises the
+// `len(keyValue) == 0` short-circuit in [requestTags.bindUrl]: a fixed pattern
+// matches, but [getPathValues] yields no wildcard values, so the `url`-tagged
+// field is left at its zero value.
+func TestServeMux_NoWildcardPattern_LeavesURLFieldZero(t *testing.T) {
+	type Req struct {
+		ID string `url:"id"`
+	}
+	captured, rec := doServeMuxRequest[Req](t,
+		http.MethodGet, "/fixed", "/fixed",
+		captureHandler[Req])
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "", captured.request.ID)
+}

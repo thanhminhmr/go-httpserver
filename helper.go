@@ -13,7 +13,6 @@ import (
 
 	"github.com/thanhminhmr/go-exception"
 	"golang.org/x/net/html/charset"
-	"golang.org/x/text/encoding"
 	"golang.org/x/text/encoding/unicode"
 	"golang.org/x/text/transform"
 )
@@ -48,10 +47,7 @@ func charsetReader(reader io.Reader, contentTypeParams map[string]string) (io.Re
 	// check if it is officially have a charset
 	if contentCharset, exists := contentTypeParams["charset"]; exists {
 		if contentEncoding, _ := charset.Lookup(contentCharset); contentEncoding != nil {
-			if contentEncoding != encoding.Nop {
-				return transform.NewReader(reader, contentEncoding.NewDecoder()), nil
-			}
-			return reader, nil
+			return transform.NewReader(reader, contentEncoding.NewDecoder()), nil
 		}
 		return nil, exception.String("Charset: Invalid content charset").SetExtra("charset", contentCharset)
 	}

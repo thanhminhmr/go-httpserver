@@ -7,6 +7,7 @@
 package httpserver
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -15,6 +16,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -290,6 +292,33 @@ func TestContext_writeResponse_BodyWriteErrorPropagates(t *testing.T) {
 	ctx.NewResponse(http.StatusOK).BytesBody([]byte("data"))
 	err := ctx.writeResponse()
 	assert.ErrorIs(t, err, fw.writeErr)
+}
+
+// TestResponse_MarshalZerologObject_IncludesHeaders covers the header branch in
+// [Response.MarshalZerologObject]: when the response carries at least one
+// header, the serialized object must include a `header` field, alongside the
+// always-emitted `status`.
+func TestResponse_MarshalZerologObject_IncludesHeaders(t *testing.T) {
+	var logBuf bytes.Buffer
+	logger := zerolog.New(&logBuf)
+
+	rec := httptest.NewRecorder()
+	ctx := &Context{writer: rec}
+	response := ctx.NewResponse(http.StatusTeapot)
+	response.Header().Set("X-Test", "value")
+
+	logger.Info().Object("response", ctx.Response()).Msg("serialized")
+
+	var decoded map[string]any
+	require.NoError(t, json.Unmarshal(logBuf.Bytes(), &decoded))
+
+	respObj, ok := decoded["response"].(map[string]any)
+	require.True(t, ok, "response object should be present")
+	assert.EqualValues(t, http.StatusTeapot, respObj["status"])
+
+	headerObj, ok := respObj["header"].(map[string]any)
+	require.True(t, ok, "header field should be serialized")
+	assert.Equal(t, []any{"value"}, headerObj["X-Test"])
 }
 
 // ============================================================================

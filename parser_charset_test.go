@@ -161,13 +161,10 @@ func TestCharset_ISO8859_1_FormBody(t *testing.T) {
 	assert.Equal(t, "café", captured.request.Name, "Name")
 }
 
-func TestCharset_USAscii_NopEncoding(t *testing.T) {
+func TestCharset_USASCII_DecodesBody(t *testing.T) {
 	type Req struct {
 		Data string `json:"data"`
 	}
-	// us-ascii is a 7-bit encoding; charset.Lookup returns encoding.Nop for it,
-	// which means the reader is returned as-is (no transformation needed since
-	// ASCII is a subset of UTF-8).
 	captured, rec := doRequest[Req](t, captureHandler[Req], http.MethodPost, "/",
 		withRawBody("application/json; charset=us-ascii", []byte(`{"data":"hello"}`)))
 	assert.Equal(t, http.StatusOK, rec.Code)
