@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"net"
 	"net/http"
 	"strconv"
 	"time"
@@ -54,11 +55,11 @@ var registerServer = ctrl.Register
 // validated before NewServer is called, and it should not be modified afterward.
 // If serving fails unexpectedly, config.ShutdownOnError controls whether the
 // application lifecycle is canceled.
-func NewServer(logger *zerolog.Logger, config *ServerConfig) Router {
+func NewServer(config *ServerConfig) Router {
 	// create route
 	serveMux := http.NewServeMux()
 	// start the server
-	registerServer(func(ctx, _ context.Context) (ctrl.Runner, ctrl.Cleaner) {
+	registerServer(func(ctx, globalCtx context.Context) (ctrl.Runner, ctrl.Cleaner) {
 		// create the http server
 		var server httpServer
 		server = httpServer{
@@ -70,13 +71,14 @@ func NewServer(logger *zerolog.Logger, config *ServerConfig) Router {
 				ReadHeaderTimeout: time.Duration(config.ReadHeaderTimeout) * time.Second,
 				IdleTimeout:       time.Duration(config.IdleTimeout) * time.Second,
 				MaxHeaderBytes:    config.MaxHeaderBytes,
+				BaseContext:       func(_ net.Listener) context.Context { return globalCtx },
 			},
 		}
 		// return the runner and the cleaner
 		return server.runner, server.cleaner
 	})
 	// return the router
-	return Router{serveMux: serveMux, logger: logger}
+	return Router{serveMux: serveMux}
 }
 
 // httpServer is the outer net/http boundary around the package ServeMux. It owns
@@ -112,8 +114,12 @@ func (s *httpServer) ServeHTTP(writer http.ResponseWriter, request *http.Request
 		logger.Error().Any("recovered", recovered).Msg("Recovered from panic")
 		// response with 500 Internal Server Error
 		if trackerWriter.Status == 0 {
+			clear(trackerWriter.Header())
 			trackerWriter.WriteHeader(http.StatusInternalServerError)
+			return
 		}
+		// if a response is already sent before this, abort the handler
+		panic(http.ErrAbortHandler)
 	})
 	// call the serveMux handler
 	s.serveMux.ServeHTTP(trackerWriter, request.WithContext(logger.WithContext(request.Context())))

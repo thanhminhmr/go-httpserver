@@ -88,36 +88,39 @@ func bindFullTextBodyWithTimeout(request *http.Request, contentTypeParameters ma
 		return http.StatusLengthRequired, exception.String("HttpServer: Content-Length is required but missing")
 	} else if request.ContentLength > maxBodyLength {
 		return http.StatusRequestEntityTooLarge, exception.String("HttpServer: Content-Length is too large")
-	} else if reader, err := charsetReader(request.Body, contentTypeParameters); err != nil {
-		return http.StatusUnsupportedMediaType,
-			exception.String("HttpServer: cannot determine body encoding").AddCause(err)
-	} else {
-		type resultValue struct {
-			status    int
-			err       error
-			recovered exception.Exception
-		}
-		done := make(chan resultValue, 1)
-		go func(binder func(reader io.Reader, parsed reflect.Value) (int, error), done chan<- resultValue) {
-			defer exception.Recover(func(recovered exception.Exception) { done <- resultValue{recovered: recovered} })
+	}
+	type resultValue struct {
+		status    int
+		err       error
+		recovered exception.Exception
+	}
+	done := make(chan resultValue, 1)
+	go func() {
+		defer exception.Recover(func(recovered exception.Exception) { done <- resultValue{recovered: recovered} })
+		if reader, err := charsetReader(request.Body, contentTypeParameters); err != nil {
+			done <- resultValue{
+				status: http.StatusUnsupportedMediaType,
+				err:    exception.String("HttpServer: cannot determine body encoding").AddCause(err),
+			}
+		} else {
 			status, err := binder(reader, parsed)
 			done <- resultValue{status: status, err: err}
-		}(binder, done)
-		timer := time.NewTimer(timeout)
-		defer timer.Stop()
-		select {
-		case result := <-done:
-			if result.recovered != nil {
-				panic(result.recovered)
-			}
-			return result.status, result.err
-		case <-request.Context().Done():
-			return http.StatusRequestTimeout,
-				exception.String("HttpServer: Client diconnected").AddSuppressed(request.Body.Close())
-		case <-timer.C:
-			return http.StatusRequestTimeout,
-				exception.String("HttpServer: Bind body timed out").AddSuppressed(request.Body.Close())
 		}
+	}()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case result := <-done:
+		if result.recovered != nil {
+			panic(result.recovered)
+		}
+		return result.status, result.err
+	case <-request.Context().Done():
+		return http.StatusRequestTimeout,
+			exception.String("HttpServer: Client diconnected").AddSuppressed(request.Body.Close())
+	case <-timer.C:
+		return http.StatusRequestTimeout,
+			exception.String("HttpServer: Bind body timed out").AddSuppressed(request.Body.Close())
 	}
 }
 

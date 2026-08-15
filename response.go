@@ -93,24 +93,27 @@ func (r Response) MarshalZerologObject(e *zerolog.Event) {
 // http.ResponseWriter. Router.Handle calls it once after the handler chain
 // returns. JSON marshal failures and unsupported body types become empty 500
 // responses; write and stream errors are returned to the caller for logging.
-func (c *Context) writeResponse() error {
+func (c *Context) writeResponse(logger *zerolog.Logger) {
 	switch c.marshaller {
 	case marshallerIsJson:
 		data, err := json.Marshal(c.body)
-		if err == nil {
-			c.writer.Header().Set("Content-Type", "application/json; charset=utf-8")
-			c.writer.WriteHeader(c.status)
-			_, err = c.writer.Write(data)
-		} else {
+		if err != nil {
+			logger.Error().Err(err).Msg("Failed to marshal response as JSON")
 			clear(c.writer.Header())
 			c.writer.WriteHeader(http.StatusInternalServerError)
+			return
 		}
-		return err
+		c.writer.Header().Set("Content-Type", "application/json; charset=utf-8")
+		c.writer.WriteHeader(c.status)
+		if _, err = c.writer.Write(data); err != nil {
+			logger.Error().Err(err).Msg("Failed to write response")
+			panic(http.ErrAbortHandler)
+		}
 	default:
 		switch body := c.body.(type) {
 		case nil:
 			c.writer.WriteHeader(c.status)
-			return nil
+			return
 		case []byte:
 			c.writer.WriteHeader(c.status)
 			_, err := c.writer.Write(body)
@@ -127,6 +130,9 @@ func (c *Context) writeResponse() error {
 		c.writer.WriteHeader(http.StatusInternalServerError)
 		return exception.String("Response: unsupported body type")
 	}
+	clear(c.writer.Header())
+	c.writer.WriteHeader(http.StatusInternalServerError)
+	return exception.String("Response: unsupported body type")
 }
 
 // unsafeStringToBytes returns a zero-copy byte view of value for the immediate

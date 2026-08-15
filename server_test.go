@@ -370,7 +370,7 @@ func TestNewServer_Lifecycle(t *testing.T) {
 		ShutdownOnError:   true,
 	}
 
-	router := NewServer(&logger, config)
+	router := NewServer(config).Logger(&logger)
 	require.NotNil(t, starter, "NewServer must register exactly one starter")
 
 	router.Handle("GET /", func(ctx *Context) {

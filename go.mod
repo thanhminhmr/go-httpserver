@@ -5,7 +5,7 @@ go 1.25.0
 require (
 	github.com/rs/zerolog v1.35.1
 	github.com/stretchr/testify v1.11.1
-	github.com/thanhminhmr/go-common v0.0.55
+	github.com/thanhminhmr/go-common v0.0.56
 	github.com/thanhminhmr/go-exception v0.0.17
 	golang.org/x/net v0.58.0
 	golang.org/x/text v0.41.0

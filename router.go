@@ -37,6 +37,14 @@ type Router struct {
 	middlewares []Middleware
 }
 
+func (r Router) Logger(logger *zerolog.Logger) Router {
+	return Router{
+		serveMux:    r.serveMux,
+		logger:      logger,
+		middlewares: r.middlewares,
+	}
+}
+
 // Group returns a Router that shares r's routes and logger and appends
 // middlewares to r's middleware chain. Group does not mutate r and does not
 // retain the caller's middleware slice.
@@ -67,8 +75,10 @@ func (r Router) Handle(pattern string, handler Handler) {
 		}
 	}
 	// log the route
-	r.logger.Info().Str("pattern", pattern).Array("middlewares", funcObjects(r.middlewares)).
-		Object("handler", funcObject(handler)).Msg("Registering route")
+	if r.logger != nil {
+		r.logger.Info().Str("pattern", pattern).Array("middlewares", funcObjects(r.middlewares)).
+			Object("handler", funcObject(handler)).Msg("Registering route")
+	}
 	// register the handler
 	r.serveMux.HandleFunc(pattern, func(writer http.ResponseWriter, request *http.Request) {
 		ctx := &Context{request: request, writer: writer}
