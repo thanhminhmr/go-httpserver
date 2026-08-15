@@ -10,74 +10,27 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
-	"time"
+	"unsafe"
 
 	"github.com/rs/zerolog"
-	"github.com/thanhminhmr/go-common/common"
 	"github.com/thanhminhmr/go-exception"
 )
-
-// Context carries the request context and the response being built by parser
-// handlers. It implements [context.Context] by delegating to the HTTP request.
-//
-// Context values are created by [RequestParser] and [MiddlewareParser]. The zero
-// value is invalid, and a Context must not be copied.
-type Context struct {
-	_ common.NoCopy
-
-	request *http.Request
-	writer  http.ResponseWriter
-
-	// response
-	status     int
-	body       any
-	marshaller uint
-}
 
 const (
 	marshallerIsDirect uint = iota
 	marshallerIsJson
 )
 
-// Deadline delegates to the HTTP request context.
-func (c *Context) Deadline() (deadline time.Time, ok bool) { return c.request.Context().Deadline() }
-
-// Done delegates to the HTTP request context.
-func (c *Context) Done() <-chan struct{} { return c.request.Context().Done() }
-
-// Err delegates to the HTTP request context.
-func (c *Context) Err() error { return c.request.Context().Err() }
-
-// Value delegates to the HTTP request context.
-func (c *Context) Value(key any) any { return c.request.Context().Value(key) }
-
-// Response returns a handle to the current response without changing it.
-// Its status is zero until [Context.NewResponse] is called.
-func (c *Context) Response() Response { return Response{ctx: c} }
-
-// NewResponse starts a new response with status and returns its handle.
-// It clears the previous body and all response headers. The response is written
-// only after the outermost parser returns.
-//
-// NewResponse panics unless status is between 200 and 599.
-func (c *Context) NewResponse(status int) Response {
-	if status < 200 || status > 599 {
-		panic("BUG: invalid status")
-	}
-	c.status, c.body, c.marshaller = status, nil, marshallerIsDirect
-	clear(c.writer.Header())
-	return Response{ctx: c}
-}
-
 // Response is a handle to response state owned by a [Context]. Copies share the
 // same state. The zero value is invalid.
 type Response struct{ ctx *Context }
 
-// Status returns the configured HTTP status, or zero before [Context.NewResponse].
+// Status returns the configured HTTP status, or zero before
+// [Context.NewResponse] is called.
 func (r Response) Status() int { return r.ctx.status }
 
-// Header returns the live response header map.
-// A later [Context.NewResponse] call clears it.
+// Header returns the live response header map. A later
+// [Context.NewResponse] call clears it.
 func (r Response) Header() http.Header { return r.ctx.writer.Header() }
 
 // Body returns the configured body value, or nil if no body is set.
@@ -98,9 +51,9 @@ func (r Response) StringBody(body string) {
 	r.ctx.body, r.ctx.marshaller = body, marshallerIsDirect
 }
 
-// StreamBody sets a body writer without setting Content-Type. The status is
-// committed before body runs, so an error from body can be logged but cannot
-// change the HTTP response status.
+// StreamBody sets a body writer without setting Content-Type. The HTTP status is
+// committed before body runs, so an error returned by body can be logged but
+// cannot change the response status.
 func (r Response) StreamBody(body func(io.Writer) error) {
 	r.ctx.body, r.ctx.marshaller = body, marshallerIsDirect
 }
@@ -136,6 +89,10 @@ func (r Response) MarshalZerologObject(e *zerolog.Event) {
 	}
 }
 
+// writeResponse commits the response currently stored in c to the underlying
+// http.ResponseWriter. Router.Handle calls it once after the handler chain
+// returns. JSON marshal failures and unsupported body types become empty 500
+// responses; write and stream errors are returned to the caller for logging.
 func (c *Context) writeResponse() error {
 	switch c.marshaller {
 	case marshallerIsJson:
@@ -170,4 +127,11 @@ func (c *Context) writeResponse() error {
 		c.writer.WriteHeader(http.StatusInternalServerError)
 		return exception.String("Response: unsupported body type")
 	}
+}
+
+// unsafeStringToBytes returns a zero-copy byte view of value for the immediate
+// response write path. The returned slice aliases immutable string storage and
+// must never be modified.
+func unsafeStringToBytes(value string) []byte {
+	return unsafe.Slice(unsafe.StringData(value), len(value))
 }

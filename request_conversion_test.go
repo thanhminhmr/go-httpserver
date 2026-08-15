@@ -377,7 +377,7 @@ func TestHook_TargetPureSlice_Wrapping(t *testing.T) {
 //
 // When using a non-empty json:"fieldname" tag with a numeric field (int, float,
 // etc.), the JSON body is decoded into map[string]any using decoder.UseNumber()
-// (parser.go), which produces json.Number values for JSON numbers. These values
+// (request_body.go), which produces json.Number values for JSON numbers. These values
 // are then passed to common.BindStructWithTag, whose decode hook handles
 // json.Number alongside string.
 

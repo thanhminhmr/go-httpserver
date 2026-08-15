@@ -43,94 +43,94 @@ func (f *fakeResponseWriter) Write(b []byte) (int, error) {
 
 func TestResponseWriterTracker_InitialState(t *testing.T) {
 	fake := newFakeResponseWriter()
-	tracker := newResponseWriterTracker(fake)
+	tracker := &responseTracker{ResponseWriter: fake}
 
-	assert.Equal(t, 0, tracker.Status())
-	assert.Equal(t, 0, tracker.BytesWritten())
+	assert.Equal(t, 0, tracker.Status)
+	assert.Equal(t, 0, tracker.BytesWritten)
 	assert.Same(t, fake, tracker.Unwrap())
 }
 
 func TestResponseWriterTracker_FirstWriteImplicit200(t *testing.T) {
 	fake := newFakeResponseWriter()
-	tracker := newResponseWriterTracker(fake)
+	tracker := &responseTracker{ResponseWriter: fake}
 
 	n, err := tracker.Write([]byte("hello"))
 
 	assert.NoError(t, err)
 	assert.Equal(t, 5, n)
-	assert.Equal(t, http.StatusOK, tracker.Status())
-	assert.Equal(t, 5, tracker.BytesWritten())
+	assert.Equal(t, http.StatusOK, tracker.Status)
+	assert.Equal(t, 5, tracker.BytesWritten)
 }
 
 func TestResponseWriterTracker_MultipleWritesAccumulate(t *testing.T) {
 	fake := newFakeResponseWriter()
-	tracker := newResponseWriterTracker(fake)
+	tracker := &responseTracker{ResponseWriter: fake}
 
 	n1, _ := tracker.Write([]byte("foo"))
 	n2, _ := tracker.Write([]byte("barbaz"))
 
 	assert.Equal(t, 3, n1)
 	assert.Equal(t, 6, n2)
-	assert.Equal(t, 9, tracker.BytesWritten())
+	assert.Equal(t, 9, tracker.BytesWritten)
 }
 
 func TestResponseWriterTracker_RepeatedFinalStatus_PreservesFirst(t *testing.T) {
 	fake := newFakeResponseWriter()
-	tracker := newResponseWriterTracker(fake)
+	tracker := &responseTracker{ResponseWriter: fake}
 
 	tracker.WriteHeader(http.StatusOK)
 	tracker.WriteHeader(http.StatusNotFound)
 
 	// First committed 2xx-5xx status wins, matching net/http semantics.
-	assert.Equal(t, http.StatusOK, tracker.Status())
+	assert.Equal(t, http.StatusOK, tracker.Status)
 	// Both calls are forwarded to the underlying writer.
 	assert.Equal(t, []int{http.StatusOK, http.StatusNotFound}, fake.statuses)
 }
 
 func TestResponseWriterTracker_InformationalThenFinal_TracksFinal(t *testing.T) {
 	fake := newFakeResponseWriter()
-	tracker := newResponseWriterTracker(fake)
+	tracker := &responseTracker{ResponseWriter: fake}
 
 	tracker.WriteHeader(http.StatusEarlyHints) // 103
 	tracker.WriteHeader(http.StatusOK)         // 200
 
 	// 1xx is informational; the subsequent 200 is the first final status.
-	assert.Equal(t, http.StatusOK, tracker.Status())
+	assert.Equal(t, http.StatusOK, tracker.Status)
 	assert.Equal(t, []int{http.StatusEarlyHints, http.StatusOK}, fake.statuses)
 }
 
 func TestResponseWriterTracker_MultipleInformationalThenBodyWrite_Tracks200(t *testing.T) {
 	fake := newFakeResponseWriter()
-	tracker := newResponseWriterTracker(fake)
+	tracker := &responseTracker{ResponseWriter: fake}
 
 	tracker.WriteHeader(http.StatusContinue)   // 100
 	tracker.WriteHeader(http.StatusEarlyHints) // 103
-	tracker.Write([]byte("body"))
+	_, _ = tracker.Write([]byte("body"))
 
 	// Multiple 1xx responses don't commit; first body write implies 200.
-	assert.Equal(t, http.StatusOK, tracker.Status())
-	assert.Equal(t, 4, tracker.BytesWritten())
+	assert.Equal(t, http.StatusOK, tracker.Status)
+	assert.Equal(t, 4, tracker.BytesWritten)
 }
 
 func TestResponseWriterTracker_InformationalThenFinalError_TracksError(t *testing.T) {
 	fake := newFakeResponseWriter()
-	tracker := newResponseWriterTracker(fake)
+	tracker := &responseTracker{ResponseWriter: fake}
 
 	tracker.WriteHeader(http.StatusEarlyHints)          // 103
 	tracker.WriteHeader(http.StatusInternalServerError) // 500
 
 	// 1xx is informational; the subsequent 500 is the first final status.
-	assert.Equal(t, http.StatusInternalServerError, tracker.Status())
+	assert.Equal(t, http.StatusInternalServerError, tracker.Status)
 }
 
 func TestResponseWriterTracker_InformationalDoesNotCommitFinal(t *testing.T) {
 	fake := newFakeResponseWriter()
-	tracker := newResponseWriterTracker(fake)
+	tracker := &responseTracker{ResponseWriter: fake}
 
 	tracker.WriteHeader(http.StatusEarlyHints) // 103
 
 	// 1xx is informational, not a final commit; status stays 0.
 	// This is critical for panic recovery: server.go checks
-	// wrappedWriter.Status() == 0 to decide whether to write a 500.
-	assert.Equal(t, 0, tracker.Status())
+	// wrappedWriter.Status == 0 to decide whether to write a 500.
+	assert.Equal(t, 0, tracker.Status)
 }

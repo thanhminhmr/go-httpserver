@@ -11,12 +11,21 @@ import (
 	"unsafe"
 )
 
+// The types below mirror unexported net/http ServeMux/request state and are
+// accessed through unsafe.Pointer. Their layout is coupled to the supported Go
+// standard library. TestHTTPRequestUnsafeLayout is the guardrail: a Go upgrade
+// must not be accepted until that test confirms these mirrors still match.
+
+// httpSegment mirrors the unexported net/http ServeMux pattern segment used by
+// getPathValues.
 type httpSegment struct {
 	s     string
 	wild  bool
 	multi bool
 }
 
+// httpPattern mirrors the unexported net/http ServeMux pattern representation
+// needed to associate wildcard names with request matches.
 type httpPattern struct {
 	str      string
 	method   string
@@ -25,6 +34,9 @@ type httpPattern struct {
 	loc      string
 }
 
+// httpRequest overlays the portion of http.Request needed to reach the matched
+// ServeMux pattern and wildcard values. The leading padding is intentionally
+// layout-dependent; see TestHTTPRequestUnsafeLayout.
 type httpRequest struct {
 	_ [33]uintptr
 
@@ -33,6 +45,8 @@ type httpRequest struct {
 	matches []string     // values for the matching wildcards in pat
 }
 
+// getPathValues returns all named wildcard values captured by the ServeMux
+// pattern that matched r. It returns nil when no matched pattern is available.
 func getPathValues(r *http.Request) KeyValue {
 	request := (*httpRequest)(unsafe.Pointer(r))
 	if request.pat == nil {

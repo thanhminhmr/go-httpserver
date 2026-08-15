@@ -21,7 +21,7 @@ import (
 )
 
 // ServerConfig configures the [http.Server] registered by [NewServer]. Timeout
-// values are in seconds. [NewServer] does not apply or validate the
+// values are in seconds. NewServer does not apply defaults or validate the
 // configuration tags.
 type ServerConfig struct {
 	// Port is the TCP port to listen on all interfaces.
@@ -45,13 +45,15 @@ type ServerConfig struct {
 // this variable to capture the starter without involving controller globals.
 var registerServer = ctrl.Register
 
-// NewServer creates an [http.ServeMux], installs request logging and panic
-// recovery, and registers an [http.Server] with the [ctrl] lifecycle.
+// NewServer creates a Router backed by a new [http.ServeMux] and registers its
+// HTTP server with the [ctrl] lifecycle. The server wraps all requests with
+// request/response logging and panic recovery.
 //
 // The server listens on ":<config.Port>" when the lifecycle starts and shuts
-// down during cleanup. The config must already be defaulted and validated, and
-// should not be modified after this call. If serving fails unexpectedly,
-// ShutdownOnError controls whether the application lifecycle is canceled.
+// down during cleanup. config must already have defaults applied and be
+// validated before NewServer is called, and it should not be modified afterward.
+// If serving fails unexpectedly, config.ShutdownOnError controls whether the
+// application lifecycle is canceled.
 func NewServer(logger *zerolog.Logger, config *ServerConfig) Router {
 	// create route
 	serveMux := http.NewServeMux()
@@ -77,12 +79,48 @@ func NewServer(logger *zerolog.Logger, config *ServerConfig) Router {
 	return Router{serveMux: serveMux, logger: logger}
 }
 
+// httpServer is the outer net/http boundary around the package ServeMux. It owns
+// the configured http.Server and adds per-request logging, response accounting,
+// and panic recovery before dispatching to registered routes.
 type httpServer struct {
 	config   *ServerConfig
 	serveMux *http.ServeMux
 	server   http.Server
 }
 
+// ServeHTTP installs a request-scoped logger, records response status, bytes,
+// and duration, recovers panics, and dispatches to serveMux. A panic before a
+// final response is committed becomes 500 Internal Server Error; a panic after
+// commitment preserves the already-committed response status.
+func (s *httpServer) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
+	logger := zerolog.Ctx(request.Context()).With().
+		Str("request_id", strconv.FormatUint(rand.Uint64(), 36)).Logger()
+	// log request and response
+	logger.Info().Str("method", request.Method).Str("host", request.Host).
+		Str("path", request.URL.Path).Msg("Request")
+	start := time.Now()
+	trackerWriter := &responseTracker{ResponseWriter: writer}
+	defer func(start time.Time, wrappedWriter *responseTracker) {
+		duration := time.Since(start)
+		logger.Info().Int("status", wrappedWriter.Status).
+			Int("bytes", wrappedWriter.BytesWritten).
+			Dur("duration", duration).
+			Msg("Response")
+	}(start, trackerWriter)
+	// recover any panic
+	defer exception.Recover(func(recovered exception.Exception) {
+		logger.Error().Any("recovered", recovered).Msg("Recovered from panic")
+		// response with 500 Internal Server Error
+		if trackerWriter.Status == 0 {
+			trackerWriter.WriteHeader(http.StatusInternalServerError)
+		}
+	})
+	// call the serveMux handler
+	s.serveMux.ServeHTTP(trackerWriter, request.WithContext(logger.WithContext(request.Context())))
+}
+
+// runner serves until http.Server stops. Unexpected serve errors are logged and
+// cancel the application lifecycle when ShutdownOnError is enabled.
 func (s *httpServer) runner(ctx context.Context, shutdown context.CancelFunc) {
 	logger := zerolog.Ctx(ctx)
 	logger.Info().Str("address", s.server.Addr).Msg("Start serving")
@@ -94,6 +132,8 @@ func (s *httpServer) runner(ctx context.Context, shutdown context.CancelFunc) {
 	}
 }
 
+// cleaner gracefully shuts down the HTTP server with the cleanup context and
+// logs any shutdown error.
 func (s *httpServer) cleaner(ctx context.Context) {
 	logger := zerolog.Ctx(ctx)
 	logger.Info().Msg("Shutting down...")
@@ -101,31 +141,4 @@ func (s *httpServer) cleaner(ctx context.Context) {
 		logger.Error().Err(err).Msg("Error while shutting down")
 	}
 	logger.Info().Msg("Shutdown complete")
-}
-
-func (s *httpServer) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
-	logger := zerolog.Ctx(request.Context()).With().
-		Str("request_id", strconv.FormatUint(rand.Uint64(), 36)).Logger()
-	// log request and response
-	logger.Info().Str("method", request.Method).Str("host", request.Host).
-		Str("path", request.URL.Path).Msg("Request")
-	start := time.Now()
-	wrappedWriter := newResponseWriterTracker(writer)
-	defer func(start time.Time, wrappedWriter *responseWriterTracker) {
-		duration := time.Since(start)
-		logger.Info().Int("status", wrappedWriter.Status()).
-			Int("bytes", wrappedWriter.BytesWritten()).
-			Dur("duration", duration).
-			Msg("Response")
-	}(start, wrappedWriter)
-	// recover any panic
-	defer exception.Recover(func(recovered exception.Exception) {
-		logger.Error().Any("recovered", recovered).Msg("Recovered from panic")
-		// response with 500 Internal Server Error
-		if wrappedWriter.Status() == 0 {
-			wrappedWriter.WriteHeader(http.StatusInternalServerError)
-		}
-	})
-	// call the serveMux handler
-	s.serveMux.ServeHTTP(wrappedWriter, request.WithContext(logger.WithContext(request.Context())))
 }
