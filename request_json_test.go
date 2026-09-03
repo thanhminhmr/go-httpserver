@@ -192,10 +192,10 @@ func TestJsonTag_TrailingContent(t *testing.T) {
 
 		// Bytes NOT covered by RFC 8259 ws — even other ASCII whitespace-ish
 		// controls — must be rejected.
-		{"vtab", []byte("\v"), http.StatusBadRequest},        // %x0B
-		{"ff", []byte("\f"), http.StatusBadRequest},          // %x0C
-		{"nul", []byte{0}, http.StatusBadRequest},            // %x00
-		{"bs", []byte("\b"), http.StatusBadRequest},          // %x08 backspace
+		{"vtab", []byte("\v"), http.StatusBadRequest}, // %x0B
+		{"ff", []byte("\f"), http.StatusBadRequest},   // %x0C
+		{"nul", []byte{0}, http.StatusBadRequest},     // %x00
+		{"bs", []byte("\b"), http.StatusBadRequest},   // %x08 backspace
 		{"letter", []byte("x"), http.StatusBadRequest},
 		{"comma", []byte(","), http.StatusBadRequest},
 

@@ -11,7 +11,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -72,6 +71,58 @@ func TestContext_NewResponse_ClearsPreviousResponseState(t *testing.T) {
 }
 
 // ============================================================================
+// Context.Response: existence reporting
+// ============================================================================
+
+// Response must return the zero Response and false before NewResponse is
+// called, and a live handle and true afterward.
+func TestContext_Response_ReportsExistence(t *testing.T) {
+	rec := httptest.NewRecorder()
+	ctx := &Context{writer: rec}
+
+	resp, ok := ctx.Response()
+	assert.False(t, ok, "no response exists before NewResponse")
+	assert.Equal(t, Response{}, resp, "zero Response must be returned when none exists")
+
+	ctx.NewResponse(http.StatusTeapot)
+	resp, ok = ctx.Response()
+	assert.True(t, ok, "response exists after NewResponse")
+	assert.Same(t, ctx, resp.ctx)
+	assert.Equal(t, http.StatusTeapot, resp.Status())
+}
+
+// The zero Response behaves like a nil pointer: every method call panics.
+func TestPanic_ZeroResponseMethods_Panic(t *testing.T) {
+	assert.Panics(t, func() { _ = Response{}.Status() }, "Status")
+	assert.Panics(t, func() { _ = Response{}.Header() }, "Header")
+	assert.Panics(t, func() { _ = Response{}.Body() }, "Body")
+	assert.Panics(t, func() { Response{}.Cookie(http.Cookie{Name: "n"}) }, "Cookie")
+	assert.Panics(t, func() { Response{}.BytesBody(nil) }, "BytesBody")
+	assert.Panics(t, func() { Response{}.StringBody("") }, "StringBody")
+	assert.Panics(t, func() { Response{}.StreamBody(nil) }, "StreamBody")
+	assert.Panics(t, func() { Response{}.PlainTextBody("") }, "PlainTextBody")
+	assert.Panics(t, func() { Response{}.OctetsBody(nil) }, "OctetsBody")
+	assert.Panics(t, func() { Response{}.JsonBody(nil) }, "JsonBody")
+}
+
+// The zero Response is loggable: it serializes as an empty object instead of
+// panicking.
+func TestResponse_ZeroValue_LogsAsEmptyObject(t *testing.T) {
+	var logBuf bytes.Buffer
+	logger := zerolog.New(&logBuf)
+
+	require.NotPanics(t, func() {
+		logger.Info().Object("response", Response{}).Msg("serialized")
+	})
+
+	var decoded map[string]any
+	require.NoError(t, json.Unmarshal(logBuf.Bytes(), &decoded))
+	respObj, ok := decoded["response"].(map[string]any)
+	require.True(t, ok, "zero Response should serialize as an empty object")
+	assert.Empty(t, respObj, "zero Response should not emit any fields")
+}
+
+// ============================================================================
 // Response handle: Status / Header / Body / Cookie
 // ============================================================================
 
@@ -109,6 +160,16 @@ func TestResponse_CookieSetter(t *testing.T) {
 	r := (&Context{writer: rec}).NewResponse(http.StatusOK)
 	r.Cookie(http.Cookie{Name: "session", Value: "abc"})
 	assert.Len(t, rec.Header().Values("Set-Cookie"), 1)
+}
+
+// Cookie must append rather than replace: multiple Cookie calls produce
+// multiple Set-Cookie headers, preserving all cookies.
+func TestResponse_Cookie_AppendsCookies(t *testing.T) {
+	rec := httptest.NewRecorder()
+	r := (&Context{writer: rec}).NewResponse(http.StatusOK)
+	r.Cookie(http.Cookie{Name: "a", Value: "1"})
+	r.Cookie(http.Cookie{Name: "b", Value: "2"})
+	assert.Equal(t, []string{"a=1", "b=2"}, rec.Header().Values("Set-Cookie"))
 }
 
 // ============================================================================
@@ -184,10 +245,12 @@ func TestContext_writeResponse_StringBody(t *testing.T) {
 	assert.Empty(t, rec.Header().Get("Content-Type"))
 }
 
+// The recorder is not a *StreamWriter, so writeResponse wraps it on the fly
+// (the bypass path used when the Router runs without the server's writer).
 func TestContext_writeResponse_StreamBody(t *testing.T) {
 	rec := httptest.NewRecorder()
 	ctx := &Context{writer: rec}
-	ctx.NewResponse(http.StatusOK).StreamBody(func(w io.Writer) error {
+	ctx.NewResponse(http.StatusOK).StreamBody(func(w *StreamWriter) error {
 		_, err := w.Write([]byte("streamed"))
 		return err
 	})
@@ -206,13 +269,61 @@ func TestContext_writeResponse_StreamBody_Error(t *testing.T) {
 	rec := httptest.NewRecorder()
 	streamErr := errors.New("stream write failed")
 	ctx := &Context{writer: rec}
-	ctx.NewResponse(http.StatusOK).StreamBody(func(w io.Writer) error {
+	ctx.NewResponse(http.StatusOK).StreamBody(func(*StreamWriter) error {
 		return streamErr
 	})
 	assert.PanicsWithValue(t, http.ErrAbortHandler, func() {
 		ctx.writeResponse(context.Background())
 	})
 	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+// StreamBody with an installed StreamWriter (the server path): Write flows
+// through the response accounting while Flush reaches the underlying
+// connection flush. Each Flush call must land exactly once on the underlying
+// flusher, between the surrounding Writes.
+func TestContext_writeResponse_StreamBody_Flushes(t *testing.T) {
+	fake := newFakeResponseWriter()
+	underlying := &flushRecorderWriter{ResponseWriter: fake}
+	streamWriter := &StreamWriter{writer: underlying}
+	ctx := &Context{writer: streamWriter}
+	ctx.NewResponse(http.StatusOK).StreamBody(func(w *StreamWriter) error {
+		if _, err := w.Write([]byte("first ")); err != nil {
+			return err
+		}
+		if err := w.Flush(); err != nil {
+			return err
+		}
+		_, err := w.Write([]byte("second"))
+		return err
+	})
+	require.NotPanics(t, func() {
+		ctx.writeResponse(context.Background())
+	})
+	assert.Equal(t, http.StatusOK, streamWriter.status)
+	assert.Equal(t, len("first second"), streamWriter.bytesWritten)
+	assert.Equal(t, [][]byte{[]byte("first "), []byte("second")}, fake.writes)
+	assert.Equal(t, 1, underlying.flushes)
+}
+
+// StreamWriter.Flush fails with [http.ErrNotSupported] when the underlying
+// connection cannot flush. The callback decides whether a flush failure is
+// fatal: returning it makes writeResponse abort the connection with
+// [http.ErrAbortHandler], preserving the already-committed status.
+func TestContext_writeResponse_StreamBody_FlushUnsupported_Aborts(t *testing.T) {
+	streamWriter := &StreamWriter{writer: newFakeResponseWriter()}
+	ctx := &Context{writer: streamWriter}
+	var flushErr error
+	ctx.NewResponse(http.StatusOK).StreamBody(func(w *StreamWriter) error {
+		flushErr = w.Flush()
+		return flushErr
+	})
+	assert.PanicsWithValue(t, http.ErrAbortHandler, func() {
+		ctx.writeResponse(context.Background())
+	})
+	require.Error(t, flushErr)
+	assert.ErrorIs(t, flushErr, http.ErrNotSupported)
+	assert.Equal(t, http.StatusOK, streamWriter.status)
 }
 
 func TestContext_writeResponse_PlainTextBody(t *testing.T) {
@@ -251,6 +362,18 @@ func TestContext_writeResponse_JsonBody(t *testing.T) {
 	var result payload
 	assert.NoError(t, json.Unmarshal(rec.Body.Bytes(), &result))
 	assert.Equal(t, p, result)
+}
+
+// JsonBody(nil) must marshal to the JSON null literal with the JSON content
+// type, not be treated as "no body".
+func TestContext_writeResponse_JsonBody_Nil(t *testing.T) {
+	rec := httptest.NewRecorder()
+	ctx := &Context{writer: rec}
+	ctx.NewResponse(http.StatusOK).JsonBody(nil)
+	ctx.writeResponse(context.Background())
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "application/json; charset=utf-8", rec.Header().Get("Content-Type"))
+	assert.Equal(t, "null", rec.Body.String())
 }
 
 // ============================================================================
@@ -294,6 +417,31 @@ func TestContext_writeResponse_BodyWriteError_AbortsConnection(t *testing.T) {
 	})
 }
 
+// TestContext_writeResponse_JsonBody_WriteError covers the JSON-marshaller
+// Write-error arm (response.go:113). The marshal succeeds, WriteHeader commits
+// 200, then the body Write fails: writeResponse logs and re-panics with
+// [http.ErrAbortHandler]. Mirrors the BytesBody test above for the JSON path.
+func TestContext_writeResponse_JsonBody_WriteError(t *testing.T) {
+	fw := &failingResponseWriter{writeErr: errors.New("write failed")}
+	ctx := &Context{writer: fw}
+	ctx.NewResponse(http.StatusOK).JsonBody(map[string]string{"k": "v"})
+	assert.PanicsWithValue(t, http.ErrAbortHandler, func() {
+		ctx.writeResponse(context.Background())
+	})
+}
+
+// TestContext_writeResponse_StringBody_WriteError covers the string-body
+// Write-error arm (response.go:138). Same abort contract as the JSON/bytes
+// paths; isolates the string branch which shares one panic with them.
+func TestContext_writeResponse_StringBody_WriteError(t *testing.T) {
+	fw := &failingResponseWriter{writeErr: errors.New("write failed")}
+	ctx := &Context{writer: fw}
+	ctx.NewResponse(http.StatusOK).StringBody("a string")
+	assert.PanicsWithValue(t, http.ErrAbortHandler, func() {
+		ctx.writeResponse(context.Background())
+	})
+}
+
 // TestResponse_MarshalZerologObject_IncludesHeaders covers the header branch in
 // [Response.MarshalZerologObject]: when the response carries at least one
 // header, the serialized object must include a `header` field, alongside the
@@ -307,7 +455,7 @@ func TestResponse_MarshalZerologObject_IncludesHeaders(t *testing.T) {
 	response := ctx.NewResponse(http.StatusTeapot)
 	response.Header().Set("X-Test", "value")
 
-	logger.Info().Object("response", ctx.Response()).Msg("serialized")
+	logger.Info().Object("response", response).Msg("serialized")
 
 	var decoded map[string]any
 	require.NoError(t, json.Unmarshal(logBuf.Bytes(), &decoded))
@@ -319,6 +467,34 @@ func TestResponse_MarshalZerologObject_IncludesHeaders(t *testing.T) {
 	headerObj, ok := respObj["header"].(map[string]any)
 	require.True(t, ok, "header field should be serialized")
 	assert.Equal(t, []any{"value"}, headerObj["X-Test"])
+}
+
+// TestResponse_MarshalZerologObject_IncludesBody covers the body branch in
+// [Response.MarshalZerologObject] (`if r.ctx.body != nil { e.Any("body", …) }`).
+// IncludesHeaders above intentionally leaves body nil; here a body is set so the
+// branch executes and `body` appears alongside `status` in the serialized form.
+func TestResponse_MarshalZerologObject_IncludesBody(t *testing.T) {
+	var logBuf bytes.Buffer
+	logger := zerolog.New(&logBuf)
+
+	rec := httptest.NewRecorder()
+	ctx := &Context{writer: rec}
+	response := ctx.NewResponse(http.StatusTeapot)
+	response.Header().Set("X-Test", "value")
+	response.JsonBody(map[string]string{"k": "v"})
+
+	logger.Info().Object("response", response).Msg("serialized")
+
+	var decoded map[string]any
+	require.NoError(t, json.Unmarshal(logBuf.Bytes(), &decoded))
+
+	respObj, ok := decoded["response"].(map[string]any)
+	require.True(t, ok, "response object should be present")
+	assert.EqualValues(t, http.StatusTeapot, respObj["status"])
+
+	bodyObj, ok := respObj["body"].(map[string]any)
+	require.True(t, ok, "body field should be serialized when body is set")
+	assert.Equal(t, "v", bodyObj["k"])
 }
 
 // ============================================================================

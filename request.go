@@ -95,5 +95,5 @@ func requestHandler(ctx *Context, tags *requestTags, parsed any, next Handler) {
 	}
 	logger.Trace().Any("parsed", parsed).Msg("Request parsed, calling handler...")
 	next(ctx)
-	logger.Trace().Object("response", ctx.Response()).Msg("Handler returned")
+	logger.Trace().Object("response", Response{ctx: ctx}).Msg("Handler returned")
 }

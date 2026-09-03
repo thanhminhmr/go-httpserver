@@ -72,6 +72,35 @@ func TestError_UnsupportedContentType_415(t *testing.T) {
 	assert.Empty(t, rec.Body.String())
 }
 
+// TestError_EmptyBody_IgnoresContentType pins the lazy Content-Type contract:
+// when a request carries no body (Content-Length zero), Content-Type is not
+// inspected at all, so even malformed or unsupported values are accepted. The
+// with-body contrast rows are covered by TestError_InvalidContentType_400 and
+// TestError_UnsupportedContentType_415 above.
+func TestError_EmptyBody_IgnoresContentType(t *testing.T) {
+	cases := []struct {
+		name        string
+		contentType string
+	}{
+		{"invalid content type syntax", "total ((garbage"},
+		{"wrong but valid content type", "text/plain"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			type Req struct {
+				Data string `json:"data"`
+			}
+			handler := RequestParser(captureHandler[Req])
+			req, _ := http.NewRequest(http.MethodPost, "/", nil)
+			req.Header.Set("Content-Type", tc.contentType)
+			req.ContentLength = 0
+			rec := httptest.NewRecorder()
+			asTestHTTPHandler(handler).ServeHTTP(rec, req)
+			assert.Equal(t, http.StatusOK, rec.Code)
+		})
+	}
+}
+
 func TestError_MissingContentLength_411(t *testing.T) {
 	type Req struct {
 		Data string `json:"data"`
@@ -184,12 +213,50 @@ func TestError_BindJson_ReadError_400(t *testing.T) {
 	assert.Error(t, err)
 }
 
+// TestError_BindJson_ReadAllFailsAfterDecode_400 covers the trailing-read arm
+// of bindJson (request_body.go:171). errorReader can't reach it because its
+// Read fails immediately inside Decode. lateErrorReader first delivers a
+// complete JSON value so Decode succeeds, then errors on the follow-up
+// io.ReadAll(io.MultiReader(decoder.Buffered(), reader)).
+func TestError_BindJson_ReadAllFailsAfterDecode_400(t *testing.T) {
+	type Req struct {
+		Value string `json:"value"`
+	}
+	reqType := reflect.TypeFor[Req]()
+	tags := createTags(reqType)
+
+	var req Req
+	parsed := reflect.ValueOf(&req).Elem()
+
+	status, err := tags.bindJson(&lateErrorReader{payload: []byte(`{"value":"hello"}`)}, parsed)
+	assert.Equal(t, http.StatusBadRequest, status)
+	assert.Error(t, err)
+}
+
 // ============ errorReader: returns error on Read ============
 
 type errorReader struct{}
 
 func (errorReader) Read([]byte) (int, error) {
 	return 0, io.ErrUnexpectedEOF
+}
+
+// lateErrorReader returns the configured payload on the first Read and then
+// errors on every subsequent Read. It is used to make json.Decoder.Decode
+// succeed while the trailing-content io.ReadAll in bindJson fails, exercising
+// the second error arm of bindJson.
+type lateErrorReader struct {
+	payload []byte
+	done    bool
+}
+
+func (r *lateErrorReader) Read(p []byte) (int, error) {
+	if r.done {
+		return 0, errors.New("late read failure")
+	}
+	r.done = true
+	n := copy(p, r.payload)
+	return n, nil
 }
 
 // ============ defensive ApplyDefaults failure ============

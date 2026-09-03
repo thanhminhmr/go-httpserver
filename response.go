@@ -9,7 +9,6 @@ package httpserver
 import (
 	"context"
 	"encoding/json"
-	"io"
 	"net/http"
 	"unsafe"
 
@@ -22,7 +21,9 @@ const (
 )
 
 // Response is a handle to response state owned by a [Context]. Copies share the
-// same state. The zero value is invalid.
+// same state. The zero value behaves like a nil pointer: it is safe to log but
+// not to call, and its methods panic. Context.Response returns it with false
+// when no response exists.
 type Response struct{ ctx *Context }
 
 // Status returns the configured HTTP status, or zero before
@@ -51,10 +52,18 @@ func (r Response) StringBody(body string) {
 	r.ctx.body, r.ctx.marshaller = body, marshallerIsDirect
 }
 
-// StreamBody sets a body writer without setting Content-Type. The HTTP status is
-// committed before body runs, so an error returned by body can be logged but
-// cannot change the response status.
-func (r Response) StreamBody(body func(io.Writer) error) {
+// StreamBody sets a streaming body writer without setting Content-Type. The
+// HTTP status is committed before body runs, so an error returned by body can
+// be logged but cannot change the response status. The [StreamWriter] handed
+// to body writes through the request's response writer and exposes the
+// connection controls the underlying connection supports; its Flush pushes
+// already-written bytes to the client immediately, which makes StreamBody the
+// right body for server-sent-event style responses. Transfer framing (chunked
+// encoding on HTTP/1.1) is managed by net/http and must never be set manually;
+// a Flush commits it. An error returned by body — including a flush failure
+// the callback chooses to treat as fatal — is logged and the connection is
+// then aborted via panic(http.ErrAbortHandler).
+func (r Response) StreamBody(body func(*StreamWriter) error) {
 	r.ctx.body, r.ctx.marshaller = body, marshallerIsDirect
 }
 
@@ -78,8 +87,12 @@ func (r Response) JsonBody(body any) {
 }
 
 // MarshalZerologObject implements [zerolog.LogObjectMarshaler] for the
-// configured status, headers, and body.
+// configured status, headers, and body. The zero Response logs as an empty
+// object.
 func (r Response) MarshalZerologObject(e *zerolog.Event) {
+	if r.ctx == nil {
+		return
+	}
 	e.Int("status", r.ctx.status)
 	if header := r.ctx.writer.Header(); len(header) > 0 {
 		e.Any("header", header)
@@ -91,13 +104,18 @@ func (r Response) MarshalZerologObject(e *zerolog.Event) {
 
 // writeResponse commits the response currently stored in c to the underlying
 // http.ResponseWriter. Router.Handle calls it once after the handler chain
-// returns. JSON marshal failures and unsupported body types become empty 500
-// responses because they are caught before any header is committed. Body write
-// and stream errors occur after [http.ResponseWriter.WriteHeader]; the
-// response status is already on the wire and cannot be replaced, so the error
-// is logged and the connection is then aborted via panic(http.ErrAbortHandler),
-// which server.ServeHTTP and net/http treat as a silent connection close.
+// returns. It writes nothing when the connection was taken over with
+// [Context.Hijack]. JSON marshal failures and unsupported body types become
+// empty 500 responses because they are caught before any header is committed.
+// Body write and stream errors occur after [http.ResponseWriter.WriteHeader];
+// the response status is already on the wire and cannot be replaced, so the
+// error is logged and the connection is then aborted via
+// panic(http.ErrAbortHandler), which server.ServeHTTP and net/http treat as a
+// silent connection close.
 func (c *Context) writeResponse(requestCtx context.Context) {
+	if c.hijacked {
+		return
+	}
 	logger := zerolog.Ctx(requestCtx)
 	switch c.marshaller {
 	case marshallerIsJson:
@@ -140,9 +158,13 @@ func (c *Context) writeResponse(requestCtx context.Context) {
 				break
 			}
 			return
-		case func(io.Writer) error:
+		case func(*StreamWriter) error:
 			c.writer.WriteHeader(c.status)
-			if err := body(c.writer); err != nil {
+			streamWriter, ok := c.writer.(*StreamWriter)
+			if !ok {
+				streamWriter = &StreamWriter{writer: c.writer}
+			}
+			if err := body(streamWriter); err != nil {
 				logger.Error().Err(err).Msg("Failed to write response body")
 				break
 			}

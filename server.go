@@ -88,31 +88,41 @@ type httpServer struct {
 // ServeHTTP installs a request-scoped logger, records response status, bytes,
 // and duration, recovers panics, and dispatches to serveMux. A panic before a
 // final response is committed becomes 500 Internal Server Error; a panic after
-// commitment preserves the already-committed response status.
+// commitment preserves the already-committed response status. A connection
+// taken over with [Context.Hijack] gets no HTTP response: its completion is
+// logged as a hijack, and a panic after a hijack silently aborts the
+// connection.
 func (s *httpServer) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	logger := zerolog.Ctx(request.Context()).With().
 		Str("request_id", strconv.FormatUint(rand.Uint64(), 36)).Logger()
 	logger.Info().Str("method", request.Method).Str("host", request.Host).
 		Str("path", request.URL.Path).Msg("Request")
 	start := time.Now()
-	trackerWriter := &responseTracker{ResponseWriter: writer}
-	defer func(start time.Time, wrappedWriter *responseTracker) {
+	streamWriter := &StreamWriter{writer: writer}
+	defer func(start time.Time, wrappedWriter *StreamWriter) {
 		duration := time.Since(start)
-		logger.Info().Int("status", wrappedWriter.Status).
-			Int("bytes", wrappedWriter.BytesWritten).
-			Dur("duration", duration).
-			Msg("Response")
-	}(start, trackerWriter)
-	defer exception.Recover(func(recovered exception.Exception) {
-		logger.Error().Any("recovered", recovered).Msg("Recovered from panic")
-		if trackerWriter.Status == 0 {
-			clear(trackerWriter.Header())
-			trackerWriter.WriteHeader(http.StatusInternalServerError)
+		if wrappedWriter.hijacked {
+			logger.Info().Dur("duration", duration).Msg("Connection hijacked")
 			return
 		}
-		panic(http.ErrAbortHandler)
+		logger.Info().Int("status", wrappedWriter.status).
+			Int("bytes", wrappedWriter.bytesWritten).
+			Dur("duration", duration).
+			Msg("Response")
+	}(start, streamWriter)
+	defer exception.Recover(func(recovered exception.Exception) {
+		logger.Error().Any("recovered", recovered).Msg("Recovered from panic")
+		switch {
+		case streamWriter.hijacked:
+			panic(http.ErrAbortHandler)
+		case streamWriter.status == 0:
+			clear(streamWriter.Header())
+			streamWriter.WriteHeader(http.StatusInternalServerError)
+		default:
+			panic(http.ErrAbortHandler)
+		}
 	})
-	s.serveMux.ServeHTTP(trackerWriter, request.WithContext(logger.WithContext(request.Context())))
+	s.serveMux.ServeHTTP(streamWriter, request.WithContext(logger.WithContext(request.Context())))
 }
 
 // runner serves until http.Server stops. Unexpected serve errors are logged and

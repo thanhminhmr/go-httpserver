@@ -23,6 +23,9 @@ type Handler = func(ctx *Context)
 // middleware or the route handler. Returning without calling next short-circuits
 // the chain. Code after next runs on the way out and may inspect or replace the
 // downstream response through [Context.Response] or [Context.NewResponse].
+// After a handler takes over the connection with [Context.Hijack] there is no
+// response to inspect or replace: [Context.Response] reports false and
+// [Context.Hijacked] reports true.
 type Middleware = func(ctx *Context, next func())
 
 // Router registers [Handler] values on a shared [http.ServeMux] with an ordered
@@ -64,8 +67,10 @@ func (r Router) Group(middlewares ...Middleware) Router {
 //
 // The response is written after the complete chain returns, so middleware may
 // inspect or replace a downstream response after next returns. If the chain
-// returns without creating a response, Handle writes 500 Internal Server Error.
-// Registration errors and pattern conflicts follow [http.ServeMux] behavior.
+// returns without creating a response, Handle writes 500 Internal Server Error,
+// unless the connection was taken over with [Context.Hijack], in which case
+// nothing is written. Registration errors and pattern conflicts follow
+// [http.ServeMux] behavior.
 func (r Router) Handle(pattern string, handler Handler) {
 	var dispatcher func(*Context, int)
 	dispatcher = func(ctx *Context, i int) {

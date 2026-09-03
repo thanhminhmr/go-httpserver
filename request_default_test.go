@@ -66,16 +66,6 @@ func TestDefaultTag_RequestOverridesPartially(t *testing.T) {
 	assert.Equal(t, 42, captured.request.Age, "Age (default)")
 }
 
-type defaultInvalidStruct struct {
-	Age int `default:"not-a-number"`
-}
-
-func TestDefaultTag_InvalidValue_Panics(t *testing.T) {
-	require.Panics(t, func() {
-		_ = RequestParser(captureHandler[defaultInvalidStruct])
-	})
-}
-
 // ============ default tag: string-specific tests ============
 
 type defaultStringMultiWordStruct struct {

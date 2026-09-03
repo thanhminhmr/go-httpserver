@@ -128,3 +128,19 @@ func TestFormTag_MultipleValues_SliceField(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, []string{"1", "2", "3"}, captured.request.IDs, "IDs")
 }
+
+type formAndJsonStruct struct {
+	Form string `form:"f"`
+	Json string `json:"j"`
+}
+
+// A request type mixing form and json body tags: a form-encoded body binds the
+// form field while the json field keeps its zero value — parse selects exactly
+// one body binder based on Content-Type and never attempts the other source.
+func TestFormTag_WithJsonField_PartialBinding(t *testing.T) {
+	captured, rec := doRequest[formAndJsonStruct](t, captureHandler[formAndJsonStruct],
+		http.MethodPost, "/", withFormBody(url.Values{"f": {"form-value"}}))
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "form-value", captured.request.Form, "Form (from body)")
+	assert.Equal(t, "", captured.request.Json, "Json (untouched, keeps zero value)")
+}

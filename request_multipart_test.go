@@ -7,6 +7,7 @@
 package httpserver
 
 import (
+	"bytes"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"io"
@@ -108,4 +109,34 @@ func TestMultipartTag_FileUpload(t *testing.T) {
 	assert.Equal(t, "test.txt", part.FileName(), "file name")
 	content, _ := io.ReadAll(part)
 	assert.Equal(t, "file content", string(content), "content")
+}
+
+// TestMultipartTag_ChunkedNoContentLength_Binds pins the deliberate asymmetry
+// in body binding: the form and JSON binders reject an unknown Content-Length
+// with 411 Length Required, but the multipart binder streams and therefore
+// accepts chunked requests (Content-Length -1) without complaint.
+func TestMultipartTag_ChunkedNoContentLength_Binds(t *testing.T) {
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	require.NoError(t, writer.WriteField("field1", "value1"))
+	require.NoError(t, writer.Close())
+
+	var captured multipartStruct
+	handler := RequestParser(func(ctx *Context, req multipartStruct) {
+		captured = req
+		ctx.NewResponse(http.StatusOK)
+	})
+	req, _ := http.NewRequest(http.MethodPost, "/", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.ContentLength = -1 // chunked: length unknown
+	rec := httptest.NewRecorder()
+	asTestHTTPHandler(handler).ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	require.NotNil(t, captured.Reader)
+	part, err := captured.Reader.NextPart()
+	require.NoError(t, err)
+	assert.Equal(t, "field1", part.FormName(), "form name")
+	value, _ := io.ReadAll(part)
+	assert.Equal(t, "value1", string(value), "value")
 }

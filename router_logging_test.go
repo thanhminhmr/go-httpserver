@@ -50,3 +50,35 @@ func TestFuncObjects_NonEmpty(t *testing.T) {
 	assert.NotEqual(t, "<unknown>", frames[0].Function)
 	assert.NotEqual(t, "<unknown>", frames[1].Function)
 }
+
+// TestFuncObjects_GenericInstantiation covers the [funcObjects] generic when
+// instantiated with [Middleware] (router.go uses funcObjects(r.middlewares)
+// inside Handle). The []http.Handler instantiation above exercises the same
+// body; this asserts the Middleware specialization resolves and orders results
+// identically.
+func TestFuncObjects_GenericInstantiation(t *testing.T) {
+	m := func(ctx *Context, next func()) { next() }
+	frames := funcObjects([]Middleware{m, m})
+	assert.Len(t, frames, 2)
+	assert.NotEqual(t, "<unknown>", frames[0].Function)
+	assert.NotEqual(t, "<unknown>", frames[1].Function)
+}
+
+// ============ Router.Handle: nil-logger branch ============
+
+// TestRouter_Handle_NilLogger_RegistersAndDispatches covers the false side of
+// `if r.logger != nil` in [Router.Handle] (router.go:78). Every other test
+// routes through [newTestRouter] (which installs a nop logger); here the Router
+// is built with a nil logger so route registration skips the "Registering route"
+// log, and dispatch still works end-to-end.
+func TestRouter_Handle_NilLogger_RegistersAndDispatches(t *testing.T) {
+	r := Router{serveMux: http.NewServeMux()} // logger intentionally nil
+	assert.NotPanics(t, func() {
+		r.Handle("GET /", func(ctx *Context) {
+			ctx.NewResponse(http.StatusOK).StringBody("ok")
+		})
+	})
+	rec := doRouterRequest(r, http.MethodGet, "/")
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "ok", rec.Body.String())
+}

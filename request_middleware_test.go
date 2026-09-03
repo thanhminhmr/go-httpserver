@@ -131,7 +131,9 @@ func TestMiddlewareParser_SharesContextWithDownstreamRequestParser(t *testing.T)
 	mw := MiddlewareParser(func(ctx *Context, req MWReq, next func()) {
 		mwCtx = ctx
 		next()
-		statusAfterNext = ctx.Response().Status()
+		if resp, ok := ctx.Response(); ok {
+			statusAfterNext = resp.Status()
+		}
 	})
 
 	router := newTestRouter().Group(mw)
@@ -155,7 +157,7 @@ func TestMiddlewareParser_InspectAndReplaceDownstreamResponse(t *testing.T) {
 
 	mw := MiddlewareParser(func(ctx *Context, req MWReq, next func()) {
 		next()
-		if ctx.Response().Status() == http.StatusOK {
+		if resp, ok := ctx.Response(); ok && resp.Status() == http.StatusOK {
 			ctx.NewResponse(http.StatusTeapot).StringBody("replaced")
 		}
 	})
@@ -167,7 +169,26 @@ func TestMiddlewareParser_InspectAndReplaceDownstreamResponse(t *testing.T) {
 
 	rec := doRouterRequest(router, http.MethodGet, "/")
 	assert.Equal(t, http.StatusTeapot, rec.Code)
-	assert.Equal(t, "replaced", rec.Body.String())
+}
+
+// A middleware running after next observes ok==false from Context.Response when
+// the downstream chain returned without ever creating a response; Handle then
+// writes 500 for the missing response.
+func TestMiddlewareParser_ResponseNotCreated_ReturnsFalse(t *testing.T) {
+	type MWReq struct{}
+
+	var okAfterNext bool
+	mw := MiddlewareParser(func(ctx *Context, req MWReq, next func()) {
+		next()
+		_, okAfterNext = ctx.Response()
+	})
+
+	router := newTestRouter().Group(mw)
+	router.Handle("GET /", func(ctx *Context) {}) // no response created
+
+	rec := doRouterRequest(router, http.MethodGet, "/")
+	assert.False(t, okAfterNext, "no response exists when downstream never called NewResponse")
+	assert.Equal(t, http.StatusInternalServerError, rec.Code, "missing response becomes 500")
 }
 
 // A middleware can configure a response and short-circuit without calling

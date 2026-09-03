@@ -18,7 +18,10 @@ import (
 
 // parse binds request data into parsed. Non-body sources are applied in this
 // order: header, cookie, query, URL path values. It then selects at most one body
-// binder based on method and Content-Type. A zero status with nil error means
+// binder based on method and Content-Type. A request without a body
+// (Content-Length zero) skips Content-Type inspection entirely; the form and JSON
+// binders require a known Content-Length, while the multipart and raw body
+// binders also accept chunked requests. A zero status with nil error means
 // success or that no applicable value was present; failures return the HTTP
 // status that RequestParser should use for its empty error response.
 func (tags *requestTags) parse(request *http.Request, parsed reflect.Value) (status int, parseErr error) {
