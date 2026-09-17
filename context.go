@@ -99,25 +99,16 @@ func (c *Context) NewResponse(status int) Response {
 // dropped peer. body runs after the Context was cleared, so it must not use
 // the Context or any response handle saved from earlier.
 //
-// Hijack returns an error — without recording anything and without touching
-// the response state, so the handler can still fall back to
-// [Context.NewResponse] — when the underlying writer does not support
-// hijacking ([http.ErrNotSupported]). A hijack failure at write time is
-// logged and written as an empty 500 response.
-func (c *Context) Hijack(body func(conn net.Conn, readWriter *bufio.ReadWriter) error) error {
+// Hijack assumes the underlying connection is hijackable: the server serves
+// plain HTTP/1.1 only — no TLS and no HTTP/2 — so that always holds. A
+// takeover that still fails at write time is logged and written as an empty
+// 500 response.
+func (c *Context) Hijack(body func(net.Conn, *bufio.ReadWriter) error) {
 	if body == nil {
 		panic("BUG: nil hijack body")
 	}
-	writer := c.writer
-	if sw, ok := writer.(*StreamWriter); ok {
-		writer = sw.writer
-	}
-	if _, ok := writer.(http.Hijacker); !ok {
-		return http.ErrNotSupported
-	}
 	c.status, c.body, c.marshaller = 0, body, marshallerIsDirect
 	c.ticket++
-	return nil
 }
 
 // Hijacked reports whether the connection is being taken over with
