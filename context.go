@@ -108,7 +108,7 @@ func (c *Context) Hijack(body func(conn net.Conn, readWriter *bufio.ReadWriter) 
 	if _, ok := writer.(http.Hijacker); !ok {
 		return http.ErrNotSupported
 	}
-	c.status, c.body, c.marshaller = 0, body, marshallerIsHijack
+	c.status, c.body, c.marshaller = 0, body, marshallerIsDirect
 	return nil
 }
 
@@ -116,7 +116,7 @@ func (c *Context) Hijack(body func(conn net.Conn, readWriter *bufio.ReadWriter) 
 // [Context.Hijack]: a pending takeover recorded by a handler, which middleware
 // may still cancel with [Context.NewResponse]. Once the takeover is committed
 // the Context is cleared, so Hijacked no longer reports it.
-func (c *Context) Hijacked() bool { return c.marshaller == marshallerIsHijack }
+func (c *Context) Hijacked() bool { return c.status == 0 && c.body != nil }
 
 // clear ends the Context's lifetime: writeResponse calls it before handing the
 // connection to a streaming or hijack body. Any use of a cleared Context is a

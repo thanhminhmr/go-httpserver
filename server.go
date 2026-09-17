@@ -99,26 +99,23 @@ func (s *httpServer) ServeHTTP(writer http.ResponseWriter, request *http.Request
 		Str("path", request.URL.Path).Msg("Request")
 	start := time.Now()
 	streamWriter := &StreamWriter{writer: writer}
-	defer func(start time.Time, wrappedWriter *StreamWriter) {
+	defer func(start time.Time, streamWriter *StreamWriter) {
 		duration := time.Since(start)
-		if wrappedWriter.hijacked {
+		if streamWriter.writer == nil {
 			logger.Info().Dur("duration", duration).Msg("Connection hijacked")
 			return
 		}
-		logger.Info().Int("status", wrappedWriter.status).
-			Int("bytes", wrappedWriter.bytesWritten).
+		logger.Info().Int("status", streamWriter.status).
+			Int("bytes", streamWriter.bytesWritten).
 			Dur("duration", duration).
 			Msg("Response")
 	}(start, streamWriter)
 	defer exception.Recover(func(recovered exception.Exception) {
 		logger.Error().Any("recovered", recovered).Msg("Recovered from panic")
-		switch {
-		case streamWriter.hijacked:
-			panic(http.ErrAbortHandler)
-		case streamWriter.status == 0:
+		if streamWriter.writer != nil && streamWriter.status == 0 {
 			clear(streamWriter.Header())
 			streamWriter.WriteHeader(http.StatusInternalServerError)
-		default:
+		} else {
 			panic(http.ErrAbortHandler)
 		}
 	})

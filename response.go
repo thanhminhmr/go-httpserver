@@ -20,7 +20,6 @@ import (
 const (
 	marshallerIsDirect uint = iota
 	marshallerIsJson
-	marshallerIsHijack
 )
 
 // Response is a handle to response state owned by a [Context]. Copies share the
@@ -128,37 +127,6 @@ func (c *Context) writeResponse(requestCtx context.Context) {
 	}
 	logger := zerolog.Ctx(requestCtx)
 	switch c.marshaller {
-	case marshallerIsHijack:
-		hijackLogger := zerolog.Ctx(c.request.Context())
-		body := c.body.(func(conn net.Conn, readWriter *bufio.ReadWriter) error)
-		writer := c.writer
-		var streamWriter *StreamWriter
-		if sw, ok := writer.(*StreamWriter); ok {
-			streamWriter, writer = sw, sw.writer
-		}
-		hijacker, ok := writer.(http.Hijacker)
-		if !ok {
-			hijackLogger.Error().Msg("Failed to hijack connection")
-			clear(c.writer.Header())
-			c.writer.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-		conn, readWriter, err := hijacker.Hijack()
-		if err != nil {
-			hijackLogger.Error().Err(err).Msg("Failed to hijack connection")
-			clear(c.writer.Header())
-			c.writer.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-		if streamWriter != nil {
-			streamWriter.hijacked = true
-		}
-		c.clear()
-		defer conn.Close()
-		if err := body(conn, readWriter); err != nil {
-			hijackLogger.Error().Err(err).Msg("Failed to handle hijacked connection")
-		}
-		return
 	case marshallerIsJson:
 		data, err := json.Marshal(c.body)
 		if err != nil {
@@ -205,10 +173,28 @@ func (c *Context) writeResponse(requestCtx context.Context) {
 			if !ok {
 				streamWriter = &StreamWriter{writer: c.writer}
 			}
-			c.clear()
+			c.request, c.writer = nil, nil
 			if err := body(streamWriter); err != nil {
 				logger.Error().Err(err).Msg("Failed to write response body")
 				break
+			}
+			return
+		case func(net.Conn, *bufio.ReadWriter) error:
+			conn, readWriter, err := http.NewResponseController(c.writer).Hijack()
+			if err != nil {
+				logger.Error().Err(err).Msg("Failed to hijack connection")
+				clear(c.writer.Header())
+				c.writer.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			c.request, c.writer = nil, nil
+			defer func(logger *zerolog.Logger, conn net.Conn) {
+				if err := conn.Close(); err != nil {
+					logger.Error().Err(err).Msg("Failed while closing hijacked connection")
+				}
+			}(logger, conn)
+			if err := body(conn, readWriter); err != nil {
+				logger.Error().Err(err).Msg("Failed to handle hijacked connection")
 			}
 			return
 		default:

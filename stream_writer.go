@@ -7,6 +7,8 @@
 package httpserver
 
 import (
+	"bufio"
+	"net"
 	"net/http"
 	"time"
 )
@@ -36,7 +38,6 @@ type StreamWriter struct {
 	writer       http.ResponseWriter
 	status       int
 	bytesWritten int
-	hijacked     bool
 }
 
 // Header returns the underlying response writer's header map.
@@ -64,18 +65,24 @@ func (w *StreamWriter) Write(body []byte) (int, error) {
 	return n, err
 }
 
-// Flush pushes already-written bytes to the client without waiting for the
-// response body to finish, propagating a flush error of the underlying
-// connection.
-func (w *StreamWriter) Flush() error {
-	if flusher, ok := w.writer.(interface{ FlushError() error }); ok {
-		return flusher.FlushError()
-	}
+// Flush try to push already-written bytes to the client without waiting for
+// the response body to finish.
+func (w *StreamWriter) Flush() {
 	if flusher, ok := w.writer.(http.Flusher); ok {
 		flusher.Flush()
-		return nil
 	}
-	return http.ErrNotSupported
+}
+
+func (w *StreamWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if hijack, ok := w.writer.(http.Hijacker); ok {
+		if conn, rw, err := hijack.Hijack(); err == nil {
+			w.writer = nil
+			return conn, rw, nil
+		} else {
+			return nil, nil, err
+		}
+	}
+	return nil, nil, http.ErrNotSupported
 }
 
 // SetReadDeadline sets the read deadline of the underlying connection.
