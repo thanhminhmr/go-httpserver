@@ -10,6 +10,7 @@ The package keeps routing on the standard library instead of introducing a separ
 package main
 
 import (
+    "context"
     "net/http"
 
     "github.com/rs/zerolog"
@@ -63,6 +64,8 @@ The package Godoc is the authoritative reference for tag types, precedence, body
 `Router.Group` appends middleware without changing the parent router. Middleware calls `next` to continue, may return without calling `next` to short-circuit, and may inspect or replace the downstream response after `next` returns.
 
 Handlers create responses with `Context.NewResponse`. The router writes the response only after the complete middleware and handler chain returns. If no response was created, the router returns 500 Internal Server Error.
+
+`Response.StreamBody` streams the response body through a `StreamWriter`, whose `Flush` pushes already-written bytes to the client for server-sent-event style responses. `Context.Hijack` records a takeover of the underlying connection instead of a response; it is committed at write time, and middleware can inspect it with `Context.Hijacked` or cancel it by calling `Context.NewResponse`.
 
 ## Go compatibility
 

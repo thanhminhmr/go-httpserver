@@ -84,7 +84,7 @@
 // The framework applies no size cap or read timeout to these streams; the
 // handler owns any size or time budget (e.g. via [http.MaxBytesReader], the
 // request context, or a self-imposed deadline). Form and JSON bindings are
-// bounded by maxBodyLength (1 MiB) and maxReadBodyDuration (5s).
+// bounded to 1 MiB and read with a 5-second timeout.
 //
 // `default:"value"` supplies a value before request binding.
 //
@@ -105,8 +105,8 @@
 //
 // Form and JSON bodies are buffered and decoded before the typed handler runs.
 // Multipart and raw body tags instead expose the live request stream and should
-// be consumed during the handler or middleware that receives them. The framework
-// applies no size or time cap to these streams; the handler owns any budget.
+// be consumed during the handler or middleware that receives them; as noted
+// under Request tags, no framework size or time cap applies to them.
 //
 // # Responses and middleware
 //
@@ -125,6 +125,13 @@
 //	}
 //
 // Middleware may short-circuit a request by returning without calling next.
+//
+// [Response.StreamBody] streams a response body through a [StreamWriter] whose
+// Flush pushes already-written bytes to the client immediately, which suits
+// server-sent-event style responses. [Context.Hijack] records a takeover of
+// the underlying connection — committed, like a response, only after the chain
+// returns — which middleware may inspect with [Context.Hijacked] or cancel
+// with [Context.NewResponse].
 //
 // If the chain completes without creating a response, [Router.Handle] returns
 // 500 Internal Server Error. Servers created by [NewServer] also recover panics

@@ -18,7 +18,7 @@ import (
 // committing a final status, the first final (>=200) status is recorded, a
 // Write before any WriteHeader records an implicit 200, and written byte
 // counts accumulate. The server installs exactly one StreamWriter per request;
-// [Context.writeResponse] reuses it for [Response.StreamBody] bodies.
+// the response write reuses it for [Response.StreamBody] bodies.
 //
 // StreamWriter also exposes the connection control features the underlying
 // writer supports. [StreamWriter.Flush], [StreamWriter.Hijack],
@@ -28,8 +28,8 @@ import (
 // controllers created by wrapping code resolve them through this writer.
 // Hijack and the deadline setters return [http.ErrNotSupported] when the
 // underlying writer lacks the feature. A successful Hijack takes over the
-// connection and detaches the underlying writer, which the server then uses
-// to skip response writing and panic-recovery output for the request.
+// connection and detaches the underlying writer; after it the server writes
+// no HTTP response for the request.
 //
 // The zero value is invalid.
 type StreamWriter struct {
@@ -74,8 +74,8 @@ func (w *StreamWriter) Flush() {
 
 // Hijack takes over the underlying connection. On success the underlying
 // writer is detached: a later use of the StreamWriter is invalid. It returns
-// an error — [http.ErrNotSupported] when the underlying writer does not
-// support hijacking.
+// [http.ErrNotSupported] when the underlying writer does not support
+// hijacking, or the error reported by the underlying hijacker.
 func (w *StreamWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	hijacker, ok := w.writer.(http.Hijacker)
 	if !ok {

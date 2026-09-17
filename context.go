@@ -16,8 +16,8 @@ import (
 )
 
 // Context is the per-request state passed to [Handler] and [Middleware]. It
-// implements [context.Context] by delegating to the underlying HTTP request and
-// owns the response state assembled by the handler chain.
+// implements [context.Context] by delegating to the underlying HTTP request's
+// context and owns the response state assembled by the handler chain.
 //
 // Context values are created by [Router.Handle]. The zero value is invalid, and
 // a Context must not be copied after first use. Its lifetime ends when the

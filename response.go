@@ -26,7 +26,7 @@ const (
 // the same state. Handles are invalidated — using their mutating methods
 // panics — by a later [Context.NewResponse], a later [Context.Hijack], or by
 // the write of the response itself. The zero value behaves like a nil pointer:
-// it is safe to log but not to call, and its methods panic. Context.Response
+// it is safe to log; any other use panics. Context.Response
 // returns it with false when no response exists.
 type Response struct {
 	ctx    *Context
@@ -41,8 +41,7 @@ func (r Response) check() {
 	}
 }
 
-// Status returns the configured HTTP status, or zero before
-// [Context.NewResponse] is called.
+// Status returns the configured HTTP status.
 func (r Response) Status() int { return r.ctx.status }
 
 // Header returns the live response header map. A later
