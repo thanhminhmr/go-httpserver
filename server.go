@@ -89,9 +89,9 @@ type httpServer struct {
 // and duration, recovers panics, and dispatches to serveMux. A panic before a
 // final response is committed becomes 500 Internal Server Error; a panic after
 // commitment preserves the already-committed response status. A connection
-// taken over with [Context.Hijack] gets no HTTP response: its completion is
-// logged as a hijack, and a panic after a hijack silently aborts the
-// connection.
+// taken over with [Context.Hijack] gets no HTTP response: the takeover runs
+// while the route handles the request, its completion is logged as a hijack,
+// and a panic after a hijack silently aborts the connection.
 func (s *httpServer) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	logger := zerolog.Ctx(request.Context()).With().
 		Str("request_id", strconv.FormatUint(rand.Uint64(), 36)).Logger()

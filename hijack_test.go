@@ -26,7 +26,7 @@ import (
 // ============ helpers ============
 
 // closeRecordingConn wraps a net.Conn and counts Close calls so tests can
-// verify that Hijack closes the connection exactly once.
+// verify that the committed hijack closes the connection exactly once.
 type closeRecordingConn struct {
 	net.Conn
 	closed int
@@ -83,9 +83,60 @@ func (w *hijackableWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	return w.conn, w.readWriter, nil
 }
 
-// ============ Context.Hijack: success path ============
+// ============ Context.Hijack: pending takeover ============
 
-func TestContext_Hijack_Success(t *testing.T) {
+func TestContext_Hijack_RecordsPendingTakeover(t *testing.T) {
+	w, clientConn := newHijackableWriter(t)
+	defer clientConn.Close()
+	req, _ := http.NewRequest(http.MethodGet, "/", nil)
+	ctx := &Context{request: req, writer: w}
+	ctx.NewResponse(http.StatusOK).StringBody("pending response")
+
+	require.NoError(t, ctx.Hijack(func(net.Conn, *bufio.ReadWriter) error { return nil }))
+	assert.False(t, w.hijacked, "connection not taken over until write time")
+	assert.True(t, ctx.Hijacked(), "takeover pending")
+	_, hasResponse := ctx.Response()
+	assert.False(t, hasResponse, "pending response discarded")
+	assert.Equal(t, 0, ctx.status)
+	assert.Empty(t, w.statuses, "nothing written by recording the takeover")
+	assert.Empty(t, w.writes)
+}
+
+func TestContext_Hijack_Twice_Overwrites(t *testing.T) {
+	w, clientConn := newHijackableWriter(t)
+	defer clientConn.Close()
+	req, _ := http.NewRequest(http.MethodGet, "/", nil)
+	ctx := &Context{request: req, writer: w}
+	require.NoError(t, ctx.Hijack(func(net.Conn, *bufio.ReadWriter) error {
+		t.Error("first hijack body must not run")
+		return nil
+	}))
+	type pipeResult struct {
+		data []byte
+		err  error
+	}
+	pipeCh := make(chan pipeResult, 1)
+	go func() {
+		data, err := io.ReadAll(clientConn)
+		pipeCh <- pipeResult{data: data, err: err}
+	}()
+	require.NoError(t, ctx.Hijack(func(conn net.Conn, rw *bufio.ReadWriter) error {
+		_, err := rw.WriteString("second")
+		if err != nil {
+			return err
+		}
+		return rw.Flush()
+	}))
+	ctx.writeResponse(context.Background())
+	assert.True(t, w.hijacked, "second body committed")
+	result := <-pipeCh
+	assert.Equal(t, "second", string(result.data), "only the second body ran")
+	assert.Equal(t, 1, w.conn.closed)
+}
+
+// ============ Context.Hijack: commit at write time ============
+
+func TestContext_Hijack_Commit(t *testing.T) {
 	w, clientConn := newHijackableWriter(t)
 	defer clientConn.Close()
 	req, _ := http.NewRequest(http.MethodGet, "/", nil)
@@ -103,8 +154,11 @@ func TestContext_Hijack_Success(t *testing.T) {
 	}()
 
 	var readUnread string
-	err := ctx.Hijack(func(conn net.Conn, rw *bufio.ReadWriter) error {
+	require.NoError(t, ctx.Hijack(func(conn net.Conn, rw *bufio.ReadWriter) error {
 		assert.Same(t, w.conn, conn)
+		assert.True(t, ctx.Hijacked(), "committed inside body")
+		_, hasResponse := ctx.Response()
+		assert.False(t, hasResponse, "no response while body runs")
 		data, err := io.ReadAll(rw.Reader)
 		if err != nil {
 			return err
@@ -114,14 +168,16 @@ func TestContext_Hijack_Success(t *testing.T) {
 			return err
 		}
 		return rw.Flush()
-	})
-	require.NoError(t, err)
+	}))
+	assert.False(t, w.hijacked, "takeover deferred until write time")
+
+	ctx.writeResponse(context.Background())
+	assert.True(t, w.hijacked, "takeover committed by writeResponse")
 
 	result := <-pipeCh
 	assert.Equal(t, "body-marker", string(result.data), "client received body write")
 	assert.Equal(t, "unread request bytes", readUnread, "body received unread request bytes")
 	assert.Equal(t, 1, w.conn.closed, "connection closed exactly once")
-	assert.True(t, w.hijacked)
 	assert.True(t, ctx.Hijacked())
 	_, hasResponse := ctx.Response()
 	assert.False(t, hasResponse, "pending response discarded")
@@ -135,8 +191,9 @@ func TestContext_Hijack_ThroughStreamWriter(t *testing.T) {
 	req, _ := http.NewRequest(http.MethodGet, "/", nil)
 	streamWriter := &StreamWriter{writer: w}
 	ctx := &Context{request: req, writer: streamWriter}
-	err := ctx.Hijack(func(net.Conn, *bufio.ReadWriter) error { return nil })
-	require.NoError(t, err)
+	require.NoError(t, ctx.Hijack(func(net.Conn, *bufio.ReadWriter) error { return nil }))
+	assert.False(t, streamWriter.hijacked, "through StreamWriter: still deferred")
+	ctx.writeResponse(context.Background())
 	assert.True(t, w.hijacked)
 	assert.True(t, streamWriter.hijacked)
 	assert.True(t, ctx.Hijacked())
@@ -149,7 +206,9 @@ func TestContext_Hijack_WriteResponseSkipped(t *testing.T) {
 	ctx := &Context{request: req, writer: w}
 	require.NoError(t, ctx.Hijack(func(net.Conn, *bufio.ReadWriter) error { return nil }))
 	ctx.writeResponse(context.Background())
-	assert.Empty(t, w.statuses, "hijacked response write skipped (no 500 fallback)")
+	assert.Empty(t, w.statuses, "hijack committed instead of a response")
+	ctx.writeResponse(context.Background())
+	assert.Empty(t, w.statuses, "second writeResponse is a no-op (no 500 fallback)")
 	assert.Empty(t, w.writes)
 }
 
@@ -174,28 +233,54 @@ func TestContext_Hijack_NonHijackableWriter_Error(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code, "handler can fall back to a response")
 }
 
-func TestContext_Hijack_UnderlyingError_StateUntouched(t *testing.T) {
+func TestContext_Hijack_CommitFailure_LogsAndWrites500(t *testing.T) {
 	w, clientConn := newHijackableWriter(t)
 	defer clientConn.Close()
-	hijackErr := errors.New("hijack refused")
-	w.hijackErr = hijackErr
+	w.hijackErr = errors.New("hijack refused")
+	var logBuf bytes.Buffer
+	logger := zerolog.New(&logBuf).Level(zerolog.InfoLevel)
 	req, _ := http.NewRequest(http.MethodGet, "/", nil)
-	ctx := &Context{request: req, writer: w}
-	ctx.NewResponse(http.StatusOK).StringBody("existing")
+	req = req.WithContext(logger.WithContext(req.Context()))
+	ctx := &Context{request: req, writer: &StreamWriter{writer: w}}
+	ctx.NewResponse(http.StatusTeapot).Header().Set("X-Stale", "yes")
 	bodyCalled := false
-	err := ctx.Hijack(func(net.Conn, *bufio.ReadWriter) error {
+	require.NoError(t, ctx.Hijack(func(net.Conn, *bufio.ReadWriter) error {
 		bodyCalled = true
 		return nil
-	})
-	assert.ErrorIs(t, err, hijackErr)
-	assert.False(t, bodyCalled)
-	assert.False(t, ctx.Hijacked())
+	}))
+	ctx.writeResponse(context.Background())
+	assert.False(t, bodyCalled, "hijack body must not run")
+	assert.Equal(t, []int{http.StatusInternalServerError}, w.statuses, "empty 500 response")
+	assert.Empty(t, w.header, "stale headers cleared")
+	assert.False(t, ctx.Hijacked(), "takeover did not happen")
 	_, hasResponse := ctx.Response()
-	assert.True(t, hasResponse, "response state survives a failed hijack")
-	assert.Equal(t, http.StatusOK, ctx.status)
+	assert.False(t, hasResponse, "no response after a failed commit")
+	assert.Contains(t, logBuf.String(), "Failed to hijack connection")
 }
 
-func TestContext_Hijack_BodyError_LoggedReturnedAndClosed(t *testing.T) {
+func TestContext_Hijack_CommitCapabilityVanished_LogsAndWrites500(t *testing.T) {
+	w, clientConn := newHijackableWriter(t)
+	defer clientConn.Close()
+	rec := httptest.NewRecorder()
+	var logBuf bytes.Buffer
+	logger := zerolog.New(&logBuf).Level(zerolog.InfoLevel)
+	req, _ := http.NewRequest(http.MethodGet, "/", nil)
+	req = req.WithContext(logger.WithContext(req.Context()))
+	ctx := &Context{request: req, writer: w}
+	bodyCalled := false
+	require.NoError(t, ctx.Hijack(func(net.Conn, *bufio.ReadWriter) error {
+		bodyCalled = true
+		return nil
+	}))
+	ctx.writer = &StreamWriter{writer: rec}
+	ctx.writeResponse(context.Background())
+	assert.False(t, bodyCalled, "hijack body must not run")
+	assert.Equal(t, http.StatusInternalServerError, rec.Code, "empty 500 response")
+	assert.False(t, ctx.Hijacked(), "takeover did not happen")
+	assert.Contains(t, logBuf.String(), "Failed to hijack connection")
+}
+
+func TestContext_Hijack_BodyError_LoggedAndClosed(t *testing.T) {
 	w, clientConn := newHijackableWriter(t)
 	defer clientConn.Close()
 	var logBuf bytes.Buffer
@@ -203,10 +288,10 @@ func TestContext_Hijack_BodyError_LoggedReturnedAndClosed(t *testing.T) {
 	req, _ := http.NewRequest(http.MethodGet, "/", nil)
 	req = req.WithContext(logger.WithContext(req.Context()))
 	ctx := &Context{request: req, writer: w}
-	bodyErr := errors.New("body failed")
-	err := ctx.Hijack(func(net.Conn, *bufio.ReadWriter) error { return bodyErr })
-	assert.ErrorIs(t, err, bodyErr)
+	require.NoError(t, ctx.Hijack(func(net.Conn, *bufio.ReadWriter) error { return errors.New("body failed") }))
+	ctx.writeResponse(context.Background())
 	assert.Equal(t, 1, w.conn.closed, "connection closed")
+	assert.True(t, ctx.Hijacked())
 	assert.Contains(t, logBuf.String(), "Failed to handle hijacked connection")
 }
 
@@ -215,33 +300,64 @@ func TestContext_Hijack_BodyPanic_ClosesAndPropagates(t *testing.T) {
 	defer clientConn.Close()
 	req, _ := http.NewRequest(http.MethodGet, "/", nil)
 	ctx := &Context{request: req, writer: w}
-	require.PanicsWithValue(t, "boom", func() {
-		_ = ctx.Hijack(func(net.Conn, *bufio.ReadWriter) error { panic("boom") })
-	})
+	require.NoError(t, ctx.Hijack(func(net.Conn, *bufio.ReadWriter) error { panic("boom") }))
+	require.PanicsWithValue(t, "boom", func() { ctx.writeResponse(context.Background()) })
 	assert.Equal(t, 1, w.conn.closed, "connection closed during panic unwind")
 	assert.True(t, ctx.Hijacked())
 }
 
-// ============ Context.Hijack: misuse panics ============
+// ============ Context.Hijack: misuse panics inside body ============
 
-func TestContext_Hijack_Twice_Panics(t *testing.T) {
+func TestContext_Hijack_AgainInsideBody_Panics(t *testing.T) {
 	w, clientConn := newHijackableWriter(t)
 	defer clientConn.Close()
 	req, _ := http.NewRequest(http.MethodGet, "/", nil)
 	ctx := &Context{request: req, writer: w}
-	require.NoError(t, ctx.Hijack(func(net.Conn, *bufio.ReadWriter) error { return nil }))
-	require.Panics(t, func() {
+	innerPanic := make(chan any, 1)
+	require.NoError(t, ctx.Hijack(func(net.Conn, *bufio.ReadWriter) error {
+		defer func() { innerPanic <- recover() }()
 		_ = ctx.Hijack(func(net.Conn, *bufio.ReadWriter) error { return nil })
-	})
+		return nil
+	}))
+	ctx.writeResponse(context.Background())
+	assert.Equal(t, "BUG: connection already hijacked", <-innerPanic)
 }
 
-func TestContext_NewResponse_AfterHijack_Panics(t *testing.T) {
+func TestContext_NewResponse_InsideHijackBody_Panics(t *testing.T) {
 	w, clientConn := newHijackableWriter(t)
 	defer clientConn.Close()
 	req, _ := http.NewRequest(http.MethodGet, "/", nil)
 	ctx := &Context{request: req, writer: w}
-	require.NoError(t, ctx.Hijack(func(net.Conn, *bufio.ReadWriter) error { return nil }))
-	require.Panics(t, func() { ctx.NewResponse(http.StatusOK) })
+	innerPanic := make(chan any, 1)
+	require.NoError(t, ctx.Hijack(func(net.Conn, *bufio.ReadWriter) error {
+		defer func() { innerPanic <- recover() }()
+		_ = ctx.NewResponse(http.StatusOK)
+		return nil
+	}))
+	ctx.writeResponse(context.Background())
+	assert.Equal(t, "BUG: response after hijack", <-innerPanic)
+}
+
+// ============ cancel by response ============
+
+func TestContext_NewResponse_CancelsPendingHijack(t *testing.T) {
+	w, clientConn := newHijackableWriter(t)
+	defer clientConn.Close()
+	req, _ := http.NewRequest(http.MethodGet, "/", nil)
+	ctx := &Context{request: req, writer: w}
+	bodyCalled := false
+	require.NoError(t, ctx.Hijack(func(net.Conn, *bufio.ReadWriter) error {
+		bodyCalled = true
+		return nil
+	}))
+	ctx.NewResponse(http.StatusOK).StringBody("fallback")
+	assert.False(t, ctx.Hijacked(), "pending takeover canceled")
+	ctx.writeResponse(context.Background())
+	assert.False(t, w.hijacked, "connection never taken over")
+	assert.False(t, bodyCalled, "hijack body never ran")
+	assert.Equal(t, []int{http.StatusOK}, w.statuses)
+	assert.Equal(t, [][]byte{[]byte("fallback")}, w.writes)
+	assert.Equal(t, 0, w.conn.closed)
 }
 
 // ============ middleware interaction ============
@@ -255,17 +371,41 @@ func TestMiddleware_ObservesHijack_AfterNext(t *testing.T) {
 		afterHijacked = ctx.Hijacked()
 		_, hasResponse = ctx.Response()
 	})
-	var hijackErr error
 	router.Handle("GET /", func(ctx *Context) {
-		hijackErr = ctx.Hijack(func(net.Conn, *bufio.ReadWriter) error { return nil })
+		require.NoError(t, ctx.Hijack(func(net.Conn, *bufio.ReadWriter) error { return nil }))
 	})
 	req, _ := http.NewRequest(http.MethodGet, "/", nil)
 	router.serveMux.ServeHTTP(w, req)
-	require.NoError(t, hijackErr)
-	assert.True(t, afterHijacked, "middleware observes the hijack after next")
+	assert.True(t, afterHijacked, "middleware observes the pending takeover after next")
 	assert.False(t, hasResponse, "middleware sees no response to replace")
+	assert.True(t, w.hijacked, "takeover committed after the chain returned")
 	assert.Empty(t, w.statuses)
 	assert.Empty(t, w.writes)
+}
+
+func TestMiddleware_VetoesHijack_ReplacesResponse(t *testing.T) {
+	w, clientConn := newHijackableWriter(t)
+	defer clientConn.Close()
+	bodyCalled := false
+	router := newTestRouter().Group(func(ctx *Context, next func()) {
+		next()
+		if ctx.Hijacked() {
+			ctx.NewResponse(http.StatusForbidden).StringBody("upgrade not allowed")
+		}
+	})
+	router.Handle("GET /", func(ctx *Context) {
+		require.NoError(t, ctx.Hijack(func(net.Conn, *bufio.ReadWriter) error {
+			bodyCalled = true
+			return nil
+		}))
+	})
+	req, _ := http.NewRequest(http.MethodGet, "/", nil)
+	router.serveMux.ServeHTTP(w, req)
+	assert.False(t, w.hijacked, "connection never taken over")
+	assert.False(t, bodyCalled, "hijack body never ran")
+	assert.Equal(t, []int{http.StatusForbidden}, w.statuses)
+	assert.Equal(t, [][]byte{[]byte("upgrade not allowed")}, w.writes)
+	assert.Equal(t, 0, w.conn.closed)
 }
 
 // ============ server integration ============
@@ -300,15 +440,44 @@ func TestHTTPServer_PanicAfterHijack_AbortsConnection(t *testing.T) {
 	logger := zerolog.New(&logBuf).Level(zerolog.InfoLevel)
 	router := Router{serveMux: http.NewServeMux()}
 	router.Handle("GET /", func(ctx *Context) {
-		require.NoError(t, ctx.Hijack(func(net.Conn, *bufio.ReadWriter) error { return nil }))
-		panic("boom after hijack")
+		require.NoError(t, ctx.Hijack(func(net.Conn, *bufio.ReadWriter) error { panic("boom after hijack") }))
 	})
 	server := &httpServer{serveMux: router.serveMux}
 	req, _ := http.NewRequest(http.MethodGet, "/", nil)
 	req = req.WithContext(logger.WithContext(req.Context()))
 	assert.PanicsWithValue(t, http.ErrAbortHandler, func() { server.ServeHTTP(w, req) })
+	assert.True(t, w.hijacked, "takeover committed before the panic")
 	assert.Empty(t, w.statuses, "no 500 written for a hijacked connection")
 	logs := logBuf.String()
 	assert.Contains(t, logs, "Recovered from panic")
 	assert.Contains(t, logs, "Connection hijacked")
+}
+
+func TestHTTPServer_PanicDuringMiddleware_HijackNeverCommits(t *testing.T) {
+	w, clientConn := newHijackableWriter(t)
+	defer clientConn.Close()
+	var logBuf bytes.Buffer
+	logger := zerolog.New(&logBuf).Level(zerolog.InfoLevel)
+	bodyCalled := false
+	router := Router{serveMux: http.NewServeMux()}.Group(func(ctx *Context, next func()) {
+		next()
+		panic("boom in middleware")
+	})
+	router.Handle("GET /", func(ctx *Context) {
+		require.NoError(t, ctx.Hijack(func(net.Conn, *bufio.ReadWriter) error {
+			bodyCalled = true
+			return nil
+		}))
+	})
+	server := &httpServer{serveMux: router.serveMux}
+	req, _ := http.NewRequest(http.MethodGet, "/", nil)
+	req = req.WithContext(logger.WithContext(req.Context()))
+	server.ServeHTTP(w, req)
+	assert.False(t, w.hijacked, "takeover never committed")
+	assert.False(t, bodyCalled, "hijack body never ran")
+	assert.Equal(t, []int{http.StatusInternalServerError}, w.statuses, "panic becomes 500")
+	assert.Equal(t, 0, w.conn.closed, "connection untouched")
+	logs := logBuf.String()
+	assert.Contains(t, logs, `"message":"Response"`)
+	assert.NotContains(t, logs, "Connection hijacked")
 }

@@ -104,16 +104,24 @@ func (r Response) MarshalZerologObject(e *zerolog.Event) {
 
 // writeResponse commits the response currently stored in c to the underlying
 // http.ResponseWriter. Router.Handle calls it once after the handler chain
-// returns. It writes nothing when the connection was taken over with
-// [Context.Hijack]. JSON marshal failures and unsupported body types become
-// empty 500 responses because they are caught before any header is committed.
-// Body write and stream errors occur after [http.ResponseWriter.WriteHeader];
-// the response status is already on the wire and cannot be replaced, so the
-// error is logged and the connection is then aborted via
-// panic(http.ErrAbortHandler), which server.ServeHTTP and net/http treat as a
-// silent connection close.
+// returns. A hijack recorded with [Context.Hijack] and not canceled by
+// [Context.NewResponse] is committed here instead: the connection is taken
+// over and the hijack body runs in place of the response write, so nothing is
+// written unless the takeover itself fails. JSON marshal failures and
+// unsupported body types become empty 500 responses because they are caught
+// before any header is committed. Body write and stream errors occur after
+// [http.ResponseWriter.WriteHeader]; the response status is already on the
+// wire and cannot be replaced, so the error is logged and the connection is
+// then aborted via panic(http.ErrAbortHandler), which server.ServeHTTP and
+// net/http treat as a silent connection close.
 func (c *Context) writeResponse(requestCtx context.Context) {
 	if c.hijacked {
+		return
+	}
+	if c.hijackBody != nil {
+		body := c.hijackBody
+		c.hijackBody = nil
+		c.commitHijack(body)
 		return
 	}
 	logger := zerolog.Ctx(requestCtx)

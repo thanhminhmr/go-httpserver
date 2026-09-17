@@ -17,8 +17,9 @@ import (
 // Write before any WriteHeader records an implicit 200, and written byte
 // counts accumulate. The server installs exactly one StreamWriter per request;
 // [Context.writeResponse] reuses it for [Response.StreamBody] bodies. It also
-// records that the connection was taken over with [Context.Hijack], which the
-// server layer uses to skip response writing and panic recovery output.
+// records when a takeover recorded with [Context.Hijack] is committed at
+// write time, which the server layer uses to skip response writing and panic
+// recovery output.
 //
 // StreamWriter also exposes the connection control features the underlying
 // writer supports: [StreamWriter.Flush], [StreamWriter.SetReadDeadline],
