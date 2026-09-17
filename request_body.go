@@ -82,15 +82,10 @@ func bindFullTextBody(request *http.Request, contentTypeParameters map[string]st
 // bindFullTextBodyWithTimeout runs binder in a goroutine and returns its result,
 // the request-cancellation status, or the timeout status, whichever happens
 // first. Binder panics propagate to the caller. On timeout or cancellation the
-// request body is closed to unblock the binder.
-//
-// Concurrency note: on timeout or request cancellation the binder goroutine is
-// unblocked by closing request.Body, but it may still be executing and writing
-// into parsed when this function returns. This is safe only because the
-// framework guarantees that on any bind error the typed handler never runs —
-// see requestHandler in request.go, which returns immediately after setting the
-// error status — so parsed is never observed again after a parse failure.
-// Callers MUST NOT reuse parsed on the error path.
+// request body is closed to unblock the binder goroutine, which may still be
+// running when this function returns. That is safe only because a bind error
+// means the typed handler never runs, so parsed is never observed again;
+// callers MUST NOT reuse parsed on the error path.
 func bindFullTextBodyWithTimeout(request *http.Request, contentTypeParameters map[string]string, parsed reflect.Value,
 	binder func(reader io.Reader, parsed reflect.Value) (int, error), timeout time.Duration) (int, error) {
 	if request.ContentLength < 0 {
@@ -185,14 +180,8 @@ func (tags *requestTags) bindJson(reader io.Reader, parsed reflect.Value) (int, 
 }
 
 // bindMultipart constructs a multipart.Reader over the live request body using
-// the boundary from Content-Type. It does not buffer or consume the multipart
-// body itself.
-//
-// The reader wraps the raw request stream directly: no MaxBytesReader and no
-// read timeout are applied by the framework. Unbounded multipart parsing is
-// intentional — the handler receives the live stream and owns any size or time
-// budget (e.g. by reading parts with per-part limits, honoring the request
-// context, or wrapping the body before iteration).
+// the boundary from Content-Type. The reader wraps the raw request stream
+// directly: the handler owns any size or time budget.
 func (tags *requestTags) bindMultipart(
 	request *http.Request, parsed reflect.Value, parameters map[string]string,
 ) (int, error) {
@@ -205,12 +194,9 @@ func (tags *requestTags) bindMultipart(
 	return 0, nil
 }
 
-// bindBody assigns the live request body to the raw body field. The body is not
-// buffered or rewound.
-//
-// No size cap or read timeout is applied — by design. The handler receives the
-// raw io.ReadCloser and owns any size or time budget (e.g. via MaxBytesReader,
-// honoring the request context, or a self-imposed deadline).
+// bindBody assigns the live request body to the raw body field. The body is
+// neither buffered nor rewound, and the framework applies no size cap or read
+// timeout: the handler owns any size or time budget.
 func (tags *requestTags) bindBody(request *http.Request, parsed reflect.Value) {
 	parsed.FieldByIndex(tags.bodyFieldIndex).Set(reflect.ValueOf(request.Body))
 }

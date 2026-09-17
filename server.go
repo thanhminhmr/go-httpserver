@@ -21,9 +21,8 @@ import (
 	"github.com/thanhminhmr/go-exception"
 )
 
-// ServerConfig configures the [http.Server] registered by [NewServer]. Timeout
-// values are in seconds. NewServer does not apply defaults or validate the
-// configuration tags.
+// ServerConfig configures the [http.Server] registered by [NewServer].
+// NewServer does not apply defaults or validate the configuration tags.
 type ServerConfig struct {
 	// Port is the TCP port to listen on all interfaces.
 	Port uint16 `cfg:"port" validate:"required" default:"8080"`

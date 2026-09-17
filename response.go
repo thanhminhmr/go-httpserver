@@ -26,8 +26,7 @@ const (
 // the same state. Handles are invalidated — using their mutating methods
 // panics — by a later [Context.NewResponse], a later [Context.Hijack], or by
 // the write of the response itself. The zero value behaves like a nil pointer:
-// it is safe to log; any other use panics. Context.Response
-// returns it with false when no response exists.
+// it is safe to log; any other use panics.
 type Response struct {
 	ctx    *Context
 	ticket uint
@@ -69,18 +68,21 @@ func (r Response) StringBody(body string) {
 	r.ctx.body, r.ctx.marshaller = body, marshallerIsDirect
 }
 
-// StreamBody sets a streaming body writer without setting Content-Type. The
-// HTTP status is committed before body runs, so an error returned by body can
-// be logged but cannot change the response status. The [StreamWriter] handed
-// to body writes through the request's response writer and exposes the
-// connection controls the underlying connection supports; its Flush pushes
-// already-written bytes to the client immediately, which makes StreamBody the
-// right body for server-sent-event style responses. Transfer framing (chunked
-// encoding on HTTP/1.1) is managed by net/http and must never be set manually;
-// a Flush commits it. body runs after the Context was cleared, so it must not
-// use the Context or any response handle saved from earlier. An error returned
-// by body is logged and the connection is then aborted via
-// panic(http.ErrAbortHandler).
+// StreamBody sets body as the streaming response body without setting
+// Content-Type. body runs after the response status and headers are
+// committed:
+//
+//   - The [StreamWriter] handed to body writes through the response
+//     writer and exposes the connection controls the underlying
+//     connection supports.
+//   - Flush pushes already-written bytes to the client immediately,
+//     which suits server-sent-event style responses. Transfer framing
+//     (chunked encoding on HTTP/1.1) is managed by net/http.
+//   - An error returned by body is logged and the connection is aborted
+//     via panic(http.ErrAbortHandler): the status is already on the
+//     wire and cannot be changed.
+//   - body runs after the Context was cleared and must not use it, or
+//     any response handle saved from earlier.
 func (r Response) StreamBody(body func(*StreamWriter) error) {
 	r.check()
 	r.ctx.body, r.ctx.marshaller = body, marshallerIsDirect
@@ -137,9 +139,8 @@ func (r Response) MarshalZerologObject(e *zerolog.Event) {
 // then aborted via panic(http.ErrAbortHandler), which server.ServeHTTP and
 // net/http treat as a silent connection close.
 //
-// Before a streaming or hijack body runs, c is cleared: those bodies own the
-// connection and outlive the Context, and any use they make of c — or of a
-// [Response] handle saved from earlier — is invalid.
+// Before a streaming or hijack body runs, c is cleared: any use of c — or of
+// a [Response] handle saved from earlier — is invalid.
 func (c *Context) writeResponse(requestCtx context.Context) {
 	if c.writer == nil {
 		return

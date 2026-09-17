@@ -39,19 +39,13 @@ type httpPattern struct {
 //
 // The leading _ [33]uintptr field is intentional, layout-dependent padding: it
 // skips the 33 pointer-sized machine words that precede Request.pat in the Go
-// 1.22–1.26 standard library's net/http.Request struct layout. The unsafe
-// mirror only needs pat and matches, so the padding is sized to land on pat's
-// offset.
-//
-// This constant is fragile: any change to net/http.Request's field set, order,
-// or sizing — which the Go compatibility promise does NOT protect for
-// unexported fields — will silently misalign this mirror. TestHTTPRequestUnsafeLayout
-// in request_path_unsafe_test.go is the sole guardrail: it walks
-// reflect.TypeFor[http.Request]() and asserts that the offsets/sizes of pat,
-// matches, and the mirrored pattern/segment structs still match. A Go upgrade
-// that breaks that test requires recomputing the [33]uintptr constant by
-// inspecting the current net/http.Request layout (e.g. via go doc -src
-// net/http.Request or by printing unsafe.Offsetof).
+// 1.22–1.26 standard library's net/http.Request struct layout, landing the
+// mirror on pat's offset. Unexported fields are not covered by the Go
+// compatibility promise, so any change to the Request layout silently
+// misaligns this mirror; TestHTTPRequestUnsafeLayout in
+// request_path_unsafe_test.go is the sole guardrail. A Go upgrade that breaks
+// that test requires recomputing the [33]uintptr constant from the current
+// net/http.Request layout.
 type httpRequest struct {
 	_ [33]uintptr
 

@@ -50,9 +50,8 @@ func (c *Context) Err() error { return c.request.Context().Err() }
 func (c *Context) Value(key any) any { return c.request.Context().Value(key) }
 
 // Response returns a handle to the current response and reports whether one
-// exists. Its status is zero until [Context.NewResponse] is called; until then
-// Response returns the zero Response and false. A pending [Context.Hijack]
-// means no response exists either.
+// exists. It returns the zero Response and false before [Context.NewResponse]
+// is called and while a [Context.Hijack] is pending.
 func (c *Context) Response() (Response, bool) {
 	if c.status == 0 {
 		return Response{}, false
@@ -78,31 +77,30 @@ func (c *Context) NewResponse(status int) Response {
 	return Response{ctx: c, ticket: c.ticket}
 }
 
-// Hijack records body as the takeover handler for the underlying network
-// connection. The takeover itself is committed after the complete middleware
-// and handler chain returns, at the same point a response is written: a
-// pending hijack discards any response state assembled so far — after Hijack,
-// [Context.Response] reports false and [Context.Hijacked] reports true — and
-// at write time the connection is handed to body instead of writing a
-// response. Middleware that runs after the handler can inspect the pending
-// takeover with [Context.Hijacked] and cancel it by calling
-// [Context.NewResponse]; calling Hijack again before the write replaces body.
-// Hijack invalidates [Response] handles returned earlier; using them panics.
+// Hijack records body as the takeover handler for the underlying
+// connection. The takeover is committed after the middleware and handler
+// chain returns, in place of the response:
 //
-// body receives the hijacked connection and a buffered ReadWriter holding any
-// unread request bytes. A protocol-switch response (for example the WebSocket
-// 101 upgrade line with its headers) must be written manually inside body.
-// body owns the connection for its duration; the connection is closed when
-// body returns or panics, and the error returned by body is logged at write
-// time. After the takeover the HTTP request context no longer reflects the
-// connection, so body must rely on connection reads or deadlines to notice a
-// dropped peer. body runs after the Context was cleared, so it must not use
-// the Context or any response handle saved from earlier.
+//   - Any response state is discarded; [Context.Response] reports false and
+//     [Context.Hijacked] reports true until the takeover is committed.
+//   - Later middleware may cancel it with [Context.NewResponse]; calling
+//     Hijack again replaces body.
+//   - Hijack invalidates earlier [Response] handles; using them panics.
 //
-// Hijack assumes the underlying connection is hijackable: the server serves
-// plain HTTP/1.1 only — no TLS and no HTTP/2 — so that always holds. A
-// takeover that still fails at write time is logged and written as an empty
-// 500 response.
+// body receives the hijacked connection and a buffered ReadWriter holding
+// any unread request bytes; a protocol-switch response (for example the
+// WebSocket 101 upgrade) must be written manually inside body.
+//
+//   - The connection is closed when body returns or panics; the error
+//     returned by body is logged.
+//   - After the takeover the request context no longer reflects the
+//     connection: body must rely on connection reads or deadlines.
+//   - body runs after the Context was cleared and must not use it, or any
+//     response handle saved from earlier.
+//
+// The server serves plain HTTP/1.1, so connections are always hijackable;
+// a takeover that still fails at write time is logged and answered with
+// an empty 500 response.
 func (c *Context) Hijack(body func(net.Conn, *bufio.ReadWriter) error) {
 	if body == nil {
 		panic("BUG: nil hijack body")
@@ -111,8 +109,7 @@ func (c *Context) Hijack(body func(net.Conn, *bufio.ReadWriter) error) {
 	c.ticket++
 }
 
-// Hijacked reports whether the connection is being taken over with
-// [Context.Hijack]: a pending takeover recorded by a handler, which middleware
-// may still cancel with [Context.NewResponse]. Once the takeover is committed
-// the Context is cleared, so Hijacked no longer reports it.
+// Hijacked reports whether a [Context.Hijack] takeover is pending — recorded
+// but not yet committed. Once committed, the Context is cleared and Hijacked
+// no longer reports it.
 func (c *Context) Hijacked() bool { return c.status == 0 && c.body != nil }

@@ -20,16 +20,13 @@ import (
 // counts accumulate. The server installs exactly one StreamWriter per request;
 // the response write reuses it for [Response.StreamBody] bodies.
 //
-// StreamWriter also exposes the connection control features the underlying
-// writer supports. [StreamWriter.Flush], [StreamWriter.Hijack],
-// [StreamWriter.SetReadDeadline], [StreamWriter.SetWriteDeadline], and
-// [StreamWriter.EnableFullDuplex] delegate to the underlying writer; their
-// signatures match the probes [http.ResponseController] performs, so response
-// controllers created by wrapping code resolve them through this writer.
-// Hijack and the deadline setters return [http.ErrNotSupported] when the
-// underlying writer lacks the feature. A successful Hijack takes over the
-// connection and detaches the underlying writer; after it the server writes
-// no HTTP response for the request.
+// StreamWriter also exposes the connection controls the underlying writer
+// supports — flush, hijack, deadlines, full duplex — delegating each and
+// returning [http.ErrNotSupported] when it is missing. Their signatures match
+// the probes [http.ResponseController] performs, so controllers created by
+// wrapping code resolve them through this writer. A successful Hijack takes
+// over the connection and detaches the underlying writer; after it the server
+// writes no HTTP response for the request.
 //
 // The zero value is invalid.
 type StreamWriter struct {
