@@ -71,6 +71,33 @@ func TestContext_NewResponse_ClearsPreviousResponseState(t *testing.T) {
 }
 
 // ============================================================================
+// Response handle invalidation (stale handles panic)
+// ============================================================================
+
+// A handle returned by an earlier NewResponse is invalidated by a later one:
+// only the newest handle may still mutate the response.
+func TestResponse_StaleHandle_AfterNewResponse_Panics(t *testing.T) {
+	rec := httptest.NewRecorder()
+	ctx := &Context{writer: rec}
+	first := ctx.NewResponse(http.StatusOK)
+	second := ctx.NewResponse(http.StatusCreated)
+	assert.NotPanics(t, func() { second.StringBody("fresh") })
+	assert.PanicsWithValue(t, "BUG: stale response handle", func() { first.StringBody("stale") })
+}
+
+// Writing the response invalidates every handle: nothing may mutate the
+// response once it is on the wire.
+func TestResponse_StaleHandle_AfterWriteResponse_Panics(t *testing.T) {
+	rec := httptest.NewRecorder()
+	ctx := &Context{writer: rec}
+	response := ctx.NewResponse(http.StatusOK)
+	response.StringBody("body")
+	assert.NotPanics(t, func() { ctx.writeResponse(context.Background()) })
+	assert.PanicsWithValue(t, "BUG: stale response handle", func() { response.StringBody("late") })
+	assert.Equal(t, "body", rec.Body.String(), "wire content untouched by the stale setter")
+}
+
+// ============================================================================
 // Context.Response: existence reporting
 // ============================================================================
 
@@ -333,9 +360,7 @@ func TestContext_writeResponse_StreamBody_Flushes(t *testing.T) {
 		if _, err := w.Write([]byte("first ")); err != nil {
 			return err
 		}
-		if err := w.Flush(); err != nil {
-			return err
-		}
+		w.Flush()
 		_, err := w.Write([]byte("second"))
 		return err
 	})
@@ -348,23 +373,22 @@ func TestContext_writeResponse_StreamBody_Flushes(t *testing.T) {
 	assert.Equal(t, 1, underlying.flushes)
 }
 
-// StreamWriter.Flush fails with [http.ErrNotSupported] when the underlying
-// connection cannot flush. The callback decides whether a flush failure is
-// fatal: returning it makes writeResponse abort the connection with
-// [http.ErrAbortHandler], preserving the already-committed status.
-func TestContext_writeResponse_StreamBody_FlushUnsupported_Aborts(t *testing.T) {
+// StreamWriter.Flush is a swallowed no-op when the underlying writer does not
+// implement [http.Flusher]: the stream body keeps running and the committed
+// response stays as-is, because Flush carries no error to treat as fatal.
+func TestContext_writeResponse_StreamBody_FlushUnsupported_IsNoOp(t *testing.T) {
 	streamWriter := &StreamWriter{writer: newFakeResponseWriter()}
 	ctx := &Context{writer: streamWriter}
-	var flushErr error
+	bodyRan := false
 	ctx.NewResponse(http.StatusOK).StreamBody(func(w *StreamWriter) error {
-		flushErr = w.Flush()
-		return flushErr
+		w.Flush()
+		bodyRan = true
+		return nil
 	})
-	assert.PanicsWithValue(t, http.ErrAbortHandler, func() {
+	require.NotPanics(t, func() {
 		ctx.writeResponse(context.Background())
 	})
-	require.Error(t, flushErr)
-	assert.ErrorIs(t, flushErr, http.ErrNotSupported)
+	assert.True(t, bodyRan, "stream body kept running past the no-op flush")
 	assert.Equal(t, http.StatusOK, streamWriter.status)
 }
 

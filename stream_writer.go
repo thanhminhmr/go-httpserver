@@ -18,20 +18,18 @@ import (
 // committing a final status, the first final (>=200) status is recorded, a
 // Write before any WriteHeader records an implicit 200, and written byte
 // counts accumulate. The server installs exactly one StreamWriter per request;
-// [Context.writeResponse] reuses it for [Response.StreamBody] bodies. It also
-// records when a takeover recorded with [Context.Hijack] is committed at
-// write time, which the server layer uses to skip response writing and panic
-// recovery output.
+// [Context.writeResponse] reuses it for [Response.StreamBody] bodies.
 //
 // StreamWriter also exposes the connection control features the underlying
-// writer supports: [StreamWriter.Flush], [StreamWriter.SetReadDeadline],
-// [StreamWriter.SetWriteDeadline], and [StreamWriter.EnableFullDuplex] delegate
-// to the underlying writer and return [http.ErrNotSupported] when it lacks the
-// feature. The deadlines and EnableFullDuplex match the probes
-// [http.ResponseController] performs, so response controllers created by
-// wrapping code resolve them through this writer; Flush does not match a
-// controller probe ([http.Flusher] carries no error) and cannot be resolved
-// that way.
+// writer supports. [StreamWriter.Flush], [StreamWriter.Hijack],
+// [StreamWriter.SetReadDeadline], [StreamWriter.SetWriteDeadline], and
+// [StreamWriter.EnableFullDuplex] delegate to the underlying writer; their
+// signatures match the probes [http.ResponseController] performs, so response
+// controllers created by wrapping code resolve them through this writer.
+// Hijack and the deadline setters return [http.ErrNotSupported] when the
+// underlying writer lacks the feature. A successful Hijack takes over the
+// connection and detaches the underlying writer, which the server then uses
+// to skip response writing and panic-recovery output for the request.
 //
 // The zero value is invalid.
 type StreamWriter struct {
@@ -65,24 +63,30 @@ func (w *StreamWriter) Write(body []byte) (int, error) {
 	return n, err
 }
 
-// Flush try to push already-written bytes to the client without waiting for
-// the response body to finish.
+// Flush tries to push already-written bytes to the client without waiting
+// for the response body to finish. It is a no-op when the underlying writer
+// does not implement [http.Flusher].
 func (w *StreamWriter) Flush() {
 	if flusher, ok := w.writer.(http.Flusher); ok {
 		flusher.Flush()
 	}
 }
 
+// Hijack takes over the underlying connection. On success the underlying
+// writer is detached: a later use of the StreamWriter is invalid. It returns
+// an error — [http.ErrNotSupported] when the underlying writer does not
+// support hijacking.
 func (w *StreamWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
-	if hijack, ok := w.writer.(http.Hijacker); ok {
-		if conn, rw, err := hijack.Hijack(); err == nil {
-			w.writer = nil
-			return conn, rw, nil
-		} else {
-			return nil, nil, err
-		}
+	hijacker, ok := w.writer.(http.Hijacker)
+	if !ok {
+		return nil, nil, http.ErrNotSupported
 	}
-	return nil, nil, http.ErrNotSupported
+	conn, readWriter, err := hijacker.Hijack()
+	if err != nil {
+		return nil, nil, err
+	}
+	w.writer = nil
+	return conn, readWriter, nil
 }
 
 // SetReadDeadline sets the read deadline of the underlying connection.

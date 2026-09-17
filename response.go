@@ -22,11 +22,24 @@ const (
 	marshallerIsJson
 )
 
-// Response is a handle to response state owned by a [Context]. Copies share the
-// same state. The zero value behaves like a nil pointer: it is safe to log but
-// not to call, and its methods panic. Context.Response returns it with false
-// when no response exists.
-type Response struct{ ctx *Context }
+// Response is a handle to response state owned by a [Context]. Copies share
+// the same state. Handles are invalidated — using their mutating methods
+// panics — by a later [Context.NewResponse], a later [Context.Hijack], or by
+// the write of the response itself. The zero value behaves like a nil pointer:
+// it is safe to log but not to call, and its methods panic. Context.Response
+// returns it with false when no response exists.
+type Response struct {
+	ctx    *Context
+	ticket uint
+}
+
+// check panics unless r is still the live handle for the response state of
+// its Context.
+func (r Response) check() {
+	if r.ctx == nil || r.ticket != r.ctx.ticket {
+		panic("BUG: stale response handle")
+	}
+}
 
 // Status returns the configured HTTP status, or zero before
 // [Context.NewResponse] is called.
@@ -41,16 +54,19 @@ func (r Response) Body() any { return r.ctx.body }
 
 // Cookie appends a Set-Cookie header for cookie to the response.
 func (r Response) Cookie(cookie http.Cookie) {
+	r.check()
 	r.Header().Add("Set-Cookie", cookie.String())
 }
 
 // BytesBody sets a raw byte body without setting Content-Type.
 func (r Response) BytesBody(body []byte) {
+	r.check()
 	r.ctx.body, r.ctx.marshaller = body, marshallerIsDirect
 }
 
 // StringBody sets a raw string body without setting Content-Type.
 func (r Response) StringBody(body string) {
+	r.check()
 	r.ctx.body, r.ctx.marshaller = body, marshallerIsDirect
 }
 
@@ -64,20 +80,23 @@ func (r Response) StringBody(body string) {
 // encoding on HTTP/1.1) is managed by net/http and must never be set manually;
 // a Flush commits it. body runs after the Context was cleared, so it must not
 // use the Context or any response handle saved from earlier. An error returned
-// by body — including a flush failure the callback chooses to treat as fatal —
-// is logged and the connection is then aborted via panic(http.ErrAbortHandler).
+// by body is logged and the connection is then aborted via
+// panic(http.ErrAbortHandler).
 func (r Response) StreamBody(body func(*StreamWriter) error) {
+	r.check()
 	r.ctx.body, r.ctx.marshaller = body, marshallerIsDirect
 }
 
 // PlainTextBody sets body with Content-Type "text/plain; charset=utf-8".
 func (r Response) PlainTextBody(body string) {
+	r.check()
 	r.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	r.ctx.body, r.ctx.marshaller = body, marshallerIsDirect
 }
 
 // OctetsBody sets body with Content-Type "application/octet-stream".
 func (r Response) OctetsBody(body []byte) {
+	r.check()
 	r.Header().Set("Content-Type", "application/octet-stream")
 	r.ctx.body, r.ctx.marshaller = body, marshallerIsDirect
 }
@@ -86,6 +105,7 @@ func (r Response) OctetsBody(body []byte) {
 // Successful marshaling sets Content-Type to "application/json; charset=utf-8".
 // A marshal failure writes 500 Internal Server Error with an empty body.
 func (r Response) JsonBody(body any) {
+	r.check()
 	r.ctx.body, r.ctx.marshaller = body, marshallerIsJson
 }
 
@@ -125,6 +145,7 @@ func (c *Context) writeResponse(requestCtx context.Context) {
 	if c.writer == nil {
 		return
 	}
+	c.ticket++
 	logger := zerolog.Ctx(requestCtx)
 	switch c.marshaller {
 	case marshallerIsJson:
@@ -187,7 +208,7 @@ func (c *Context) writeResponse(requestCtx context.Context) {
 				c.writer.WriteHeader(http.StatusInternalServerError)
 				return
 			}
-			c.request, c.writer = nil, nil
+			c.request, c.writer, c.body = nil, nil, nil
 			defer func(logger *zerolog.Logger, conn net.Conn) {
 				if err := conn.Close(); err != nil {
 					logger.Error().Err(err).Msg("Failed while closing hijacked connection")

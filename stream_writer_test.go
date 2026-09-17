@@ -7,6 +7,7 @@
 package httpserver
 
 import (
+	"errors"
 	"net/http"
 	"testing"
 	"time"
@@ -162,14 +163,6 @@ type allFeaturesResponseWriter struct {
 
 func (a *allFeaturesResponseWriter) Flush() { a.flushes++ }
 
-// FlushError mirrors the underlying network writer, which exposes both the
-// [http.Flusher] contract and the error-returning flush the
-// [http.ResponseController] probes for.
-func (a *allFeaturesResponseWriter) FlushError() error {
-	a.flushes++
-	return nil
-}
-
 func (a *allFeaturesResponseWriter) SetReadDeadline(deadline time.Time) error {
 	a.readDeadline = deadline
 	return nil
@@ -195,7 +188,7 @@ func TestStreamWriter_ConnectionControls_Supported(t *testing.T) {
 	fake := newAllFeaturesResponseWriter()
 	sw := &StreamWriter{writer: fake}
 
-	require.NoError(t, sw.Flush())
+	sw.Flush() // Flush carries no error; unsupported flush is swallowed
 	assert.Equal(t, 1, fake.flushes)
 
 	readDeadline := time.Now().Add(time.Second)
@@ -211,22 +204,27 @@ func TestStreamWriter_ConnectionControls_Supported(t *testing.T) {
 }
 
 func TestStreamWriter_ConnectionControls_Unsupported(t *testing.T) {
-	sw := &StreamWriter{writer: newFakeResponseWriter()}
+	fake := newFakeResponseWriter()
+	sw := &StreamWriter{writer: fake}
 
-	assert.ErrorIs(t, sw.Flush(), http.ErrNotSupported)
+	sw.Flush() // no Flush support: a swallowed no-op
+	assert.Empty(t, fake.statuses)
+	assert.Empty(t, fake.writes)
 	assert.ErrorIs(t, sw.SetReadDeadline(time.Now()), http.ErrNotSupported)
 	assert.ErrorIs(t, sw.SetWriteDeadline(time.Now()), http.ErrNotSupported)
 	assert.ErrorIs(t, sw.EnableFullDuplex(), http.ErrNotSupported)
 }
 
-// The deadlines and EnableFullDuplex match the probes
-// [http.ResponseController] performs, so controllers created by wrapping code
-// resolve those features through the StreamWriter itself. Flush does not match
-// a controller probe ([http.Flusher] carries no error) and is therefore not
-// asserted here.
+// Every connection control matches a probe [http.ResponseController]
+// performs, so controllers created by wrapping code resolve all of them —
+// Flush included, through the plain [http.Flusher] probe — through the
+// StreamWriter itself.
 func TestStreamWriter_ResponseControllerInterop(t *testing.T) {
 	fake := newAllFeaturesResponseWriter()
 	controller := http.NewResponseController(&StreamWriter{writer: fake})
+
+	require.NoError(t, controller.Flush())
+	assert.Equal(t, 1, fake.flushes)
 
 	readDeadline := time.Now().Add(time.Second)
 	require.NoError(t, controller.SetReadDeadline(readDeadline))
@@ -238,4 +236,49 @@ func TestStreamWriter_ResponseControllerInterop(t *testing.T) {
 
 	require.NoError(t, controller.EnableFullDuplex())
 	assert.True(t, fake.fullDuplex)
+}
+
+// ============================================================================
+// StreamWriter.Hijack
+// ============================================================================
+
+// A successful Hijack returns the underlying connection and ReadWriter and
+// detaches the writer, which the server reads as the committed takeover.
+func TestStreamWriter_Hijack_Success_DetachesWriter(t *testing.T) {
+	w, clientConn := newHijackableWriter(t)
+	defer clientConn.Close()
+	sw := &StreamWriter{writer: w}
+
+	conn, readWriter, err := sw.Hijack()
+
+	require.NoError(t, err)
+	assert.Same(t, w.conn, conn)
+	assert.Same(t, w.readWriter, readWriter)
+	assert.True(t, w.hijacked, "underlying connection taken over")
+	assert.Nil(t, sw.writer, "writer detached by the successful hijack")
+}
+
+// An underlying hijack error is returned as-is and leaves the writer
+// attached.
+func TestStreamWriter_Hijack_UnderlyingError_KeepsWriter(t *testing.T) {
+	w, clientConn := newHijackableWriter(t)
+	defer clientConn.Close()
+	w.hijackErr = errors.New("hijack refused")
+	sw := &StreamWriter{writer: w}
+
+	_, _, err := sw.Hijack()
+
+	assert.Error(t, err)
+	assert.False(t, w.hijacked)
+	assert.NotNil(t, sw.writer, "writer stays attached on hijack error")
+}
+
+// A writer without hijack support yields [http.ErrNotSupported].
+func TestStreamWriter_Hijack_Unsupported(t *testing.T) {
+	sw := &StreamWriter{writer: newFakeResponseWriter()}
+
+	_, _, err := sw.Hijack()
+
+	assert.ErrorIs(t, err, http.ErrNotSupported)
+	assert.NotNil(t, sw.writer)
 }
