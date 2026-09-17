@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/rs/zerolog"
 	"github.com/thanhminhmr/go-common/common"
 )
 
@@ -21,7 +20,10 @@ import (
 // owns the response state assembled by the handler chain.
 //
 // Context values are created by [Router.Handle]. The zero value is invalid, and
-// a Context must not be copied after first use.
+// a Context must not be copied after first use. Its lifetime ends when the
+// response is written: before a streaming or hijack body runs, the Context is
+// cleared, and calling anything on it — or on a [Response] handle saved from
+// earlier — is a bug with undefined behavior.
 type Context struct {
 	_ common.NoCopy
 
@@ -32,10 +34,6 @@ type Context struct {
 	status     int
 	body       any
 	marshaller uint
-
-	// connection
-	hijacked   bool
-	hijackBody func(conn net.Conn, readWriter *bufio.ReadWriter) error
 }
 
 // Deadline delegates to the HTTP request context.
@@ -52,7 +50,8 @@ func (c *Context) Value(key any) any { return c.request.Context().Value(key) }
 
 // Response returns a handle to the current response and reports whether one
 // exists. Its status is zero until [Context.NewResponse] is called; until then
-// Response returns the zero Response and false.
+// Response returns the zero Response and false. A pending [Context.Hijack]
+// means no response exists either.
 func (c *Context) Response() (Response, bool) {
 	if c.status == 0 {
 		return Response{}, false
@@ -65,16 +64,12 @@ func (c *Context) Response() (Response, bool) {
 // [Context.Hijack]. The response is not written until the [Router.Handle]
 // middleware and handler chain returns.
 //
-// NewResponse panics unless status is between 200 and 599, or when the
-// connection was taken over by a [Context.Hijack] body.
+// NewResponse panics unless status is between 200 and 599, or when the Context
+// was already cleared for a streaming or hijack body.
 func (c *Context) NewResponse(status int) Response {
-	if c.hijacked {
-		panic("BUG: response after hijack")
-	}
 	if status < 200 || status > 599 {
 		panic("BUG: invalid status")
 	}
-	c.hijackBody = nil
 	c.status, c.body, c.marshaller = status, nil, marshallerIsDirect
 	clear(c.writer.Header())
 	return Response{ctx: c}
@@ -82,13 +77,13 @@ func (c *Context) NewResponse(status int) Response {
 
 // Hijack records body as the takeover handler for the underlying network
 // connection. The takeover itself is committed after the complete middleware
-// and handler chain returns, at the same point the response is written: a
+// and handler chain returns, at the same point a response is written: a
 // pending hijack discards any response state assembled so far — after Hijack,
 // [Context.Response] reports false and [Context.Hijacked] reports true — and
-// the later write runs body instead of writing a response. Middleware that
-// runs after the handler can inspect the pending takeover with
-// [Context.Hijacked] and cancel it by calling [Context.NewResponse]; calling
-// Hijack again before the write replaces body.
+// at write time the connection is handed to body instead of writing a
+// response. Middleware that runs after the handler can inspect the pending
+// takeover with [Context.Hijacked] and cancel it by calling
+// [Context.NewResponse]; calling Hijack again before the write replaces body.
 //
 // body receives the hijacked connection and a buffered ReadWriter holding any
 // unread request bytes. A protocol-switch response (for example the WebSocket
@@ -97,7 +92,8 @@ func (c *Context) NewResponse(status int) Response {
 // body returns or panics, and the error returned by body is logged at write
 // time. After the takeover the HTTP request context no longer reflects the
 // connection, so body must rely on connection reads or deadlines to notice a
-// dropped peer. Inside body, [Context.NewResponse] and [Context.Hijack] panic.
+// dropped peer. body runs after the Context was cleared, so it must not use
+// the Context or any response handle saved from earlier.
 //
 // Hijack returns an error — without recording anything and without touching
 // the response state, so the handler can still fall back to
@@ -105,9 +101,6 @@ func (c *Context) NewResponse(status int) Response {
 // hijacking ([http.ErrNotSupported]). A hijack failure at write time is
 // logged and written as an empty 500 response.
 func (c *Context) Hijack(body func(conn net.Conn, readWriter *bufio.ReadWriter) error) error {
-	if c.hijacked {
-		panic("BUG: connection already hijacked")
-	}
 	writer := c.writer
 	if sw, ok := writer.(*StreamWriter); ok {
 		writer = sw.writer
@@ -115,49 +108,20 @@ func (c *Context) Hijack(body func(conn net.Conn, readWriter *bufio.ReadWriter) 
 	if _, ok := writer.(http.Hijacker); !ok {
 		return http.ErrNotSupported
 	}
-	c.hijackBody = body
-	c.status, c.body, c.marshaller = 0, nil, marshallerIsDirect
+	c.status, c.body, c.marshaller = 0, body, marshallerIsHijack
 	return nil
 }
 
-// commitHijack takes over the connection and runs body. writeResponse calls
-// it for the hijack body recorded by [Context.Hijack] instead of writing the
-// response. A takeover failure is logged and written as an empty 500
-// response; after a successful takeover the server skips all response output.
-func (c *Context) commitHijack(body func(conn net.Conn, readWriter *bufio.ReadWriter) error) {
-	logger := zerolog.Ctx(c.request.Context())
-	writer := c.writer
-	var streamWriter *StreamWriter
-	if sw, ok := writer.(*StreamWriter); ok {
-		streamWriter = sw
-		writer = sw.writer
-	}
-	hijacker, ok := writer.(http.Hijacker)
-	if !ok {
-		logger.Error().Msg("Failed to hijack connection")
-		clear(c.writer.Header())
-		c.writer.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-	conn, readWriter, err := hijacker.Hijack()
-	if err != nil {
-		logger.Error().Err(err).Msg("Failed to hijack connection")
-		clear(c.writer.Header())
-		c.writer.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-	c.hijacked = true
-	if streamWriter != nil {
-		streamWriter.hijacked = true
-	}
-	defer conn.Close()
-	if err := body(conn, readWriter); err != nil {
-		logger.Error().Err(err).Msg("Failed to handle hijacked connection")
-	}
-}
-
 // Hijacked reports whether the connection is being taken over with
-// [Context.Hijack]: a pending takeover recorded by a handler — which
-// middleware may still cancel with [Context.NewResponse] — or the committed
-// takeover running its body at write time.
-func (c *Context) Hijacked() bool { return c.hijackBody != nil || c.hijacked }
+// [Context.Hijack]: a pending takeover recorded by a handler, which middleware
+// may still cancel with [Context.NewResponse]. Once the takeover is committed
+// the Context is cleared, so Hijacked no longer reports it.
+func (c *Context) Hijacked() bool { return c.marshaller == marshallerIsHijack }
+
+// clear ends the Context's lifetime: writeResponse calls it before handing the
+// connection to a streaming or hijack body. Any use of a cleared Context is a
+// bug with undefined behavior.
+func (c *Context) clear() {
+	c.request, c.writer = nil, nil
+	c.status, c.body, c.marshaller = 0, nil, marshallerIsDirect
+}

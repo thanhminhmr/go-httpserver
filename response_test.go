@@ -260,6 +260,48 @@ func TestContext_writeResponse_StreamBody(t *testing.T) {
 	assert.Empty(t, rec.Header().Get("Content-Type"))
 }
 
+// The Context's lifetime ends when writeResponse hands the connection to the
+// streaming body: it is cleared before the body runs, so the body must not use
+// the Context or a stale Response handle, and a second writeResponse is a
+// no-op rather than a 500 "response missing" fallback.
+func TestContext_writeResponse_StreamBody_ClearsContext(t *testing.T) {
+	req, _ := http.NewRequest(http.MethodGet, "/", nil)
+	streamWriter := &StreamWriter{writer: newFakeResponseWriter()}
+	ctx := &Context{request: req, writer: streamWriter}
+	bodyRan := false
+	require.NotPanics(t, func() {
+		ctx.NewResponse(http.StatusOK).StreamBody(func(*StreamWriter) error {
+			bodyRan = true // marker only; using ctx here would be a bug
+			return nil
+		})
+		ctx.writeResponse(context.Background())
+	})
+	assert.True(t, bodyRan, "stream body ran")
+	assert.Nil(t, ctx.request, "Context cleared before the body ran")
+	assert.Nil(t, ctx.writer)
+	require.NotPanics(t, func() {
+		ctx.writeResponse(context.Background())
+	})
+	assert.Equal(t, http.StatusOK, streamWriter.status, "second writeResponse is a no-op")
+}
+
+// Using the Context inside a streaming body is invalid: the Context was
+// cleared before the body ran, so NewResponse dies on the nil writer instead
+// of silently mutating response state that will never be written.
+func TestContext_NewResponse_InsideStreamBody_IsInvalid(t *testing.T) {
+	req, _ := http.NewRequest(http.MethodGet, "/", nil)
+	streamWriter := &StreamWriter{writer: newFakeResponseWriter()}
+	ctx := &Context{request: req, writer: streamWriter}
+	innerPanic := make(chan any, 1)
+	ctx.NewResponse(http.StatusOK).StreamBody(func(*StreamWriter) error {
+		defer func() { innerPanic <- recover() }()
+		_ = ctx.NewResponse(http.StatusOK)
+		return nil
+	})
+	require.NotPanics(t, func() { ctx.writeResponse(context.Background()) })
+	require.NotNil(t, <-innerPanic, "NewResponse inside a stream body must fail")
+}
+
 // A stream-body error occurs after [http.ResponseWriter.WriteHeader]; the
 // status is already on the wire and cannot be recovered. The error is logged,
 // then writeResponse panics with [http.ErrAbortHandler] so the wrapping

@@ -7,8 +7,10 @@
 package httpserver
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"unsafe"
 
@@ -18,6 +20,7 @@ import (
 const (
 	marshallerIsDirect uint = iota
 	marshallerIsJson
+	marshallerIsHijack
 )
 
 // Response is a handle to response state owned by a [Context]. Copies share the
@@ -60,9 +63,10 @@ func (r Response) StringBody(body string) {
 // already-written bytes to the client immediately, which makes StreamBody the
 // right body for server-sent-event style responses. Transfer framing (chunked
 // encoding on HTTP/1.1) is managed by net/http and must never be set manually;
-// a Flush commits it. An error returned by body — including a flush failure
-// the callback chooses to treat as fatal — is logged and the connection is
-// then aborted via panic(http.ErrAbortHandler).
+// a Flush commits it. body runs after the Context was cleared, so it must not
+// use the Context or any response handle saved from earlier. An error returned
+// by body — including a flush failure the callback chooses to treat as fatal —
+// is logged and the connection is then aborted via panic(http.ErrAbortHandler).
 func (r Response) StreamBody(body func(*StreamWriter) error) {
 	r.ctx.body, r.ctx.marshaller = body, marshallerIsDirect
 }
@@ -104,7 +108,7 @@ func (r Response) MarshalZerologObject(e *zerolog.Event) {
 
 // writeResponse commits the response currently stored in c to the underlying
 // http.ResponseWriter. Router.Handle calls it once after the handler chain
-// returns. A hijack recorded with [Context.Hijack] and not canceled by
+// returns. A hijack recorded with [Context.Hijack] and not canceled by a
 // [Context.NewResponse] is committed here instead: the connection is taken
 // over and the hijack body runs in place of the response write, so nothing is
 // written unless the takeover itself fails. JSON marshal failures and
@@ -114,18 +118,47 @@ func (r Response) MarshalZerologObject(e *zerolog.Event) {
 // wire and cannot be replaced, so the error is logged and the connection is
 // then aborted via panic(http.ErrAbortHandler), which server.ServeHTTP and
 // net/http treat as a silent connection close.
+//
+// Before a streaming or hijack body runs, c is cleared: those bodies own the
+// connection and outlive the Context, and any use they make of c — or of a
+// [Response] handle saved from earlier — is invalid.
 func (c *Context) writeResponse(requestCtx context.Context) {
-	if c.hijacked {
-		return
-	}
-	if c.hijackBody != nil {
-		body := c.hijackBody
-		c.hijackBody = nil
-		c.commitHijack(body)
+	if c.writer == nil {
 		return
 	}
 	logger := zerolog.Ctx(requestCtx)
 	switch c.marshaller {
+	case marshallerIsHijack:
+		hijackLogger := zerolog.Ctx(c.request.Context())
+		body := c.body.(func(conn net.Conn, readWriter *bufio.ReadWriter) error)
+		writer := c.writer
+		var streamWriter *StreamWriter
+		if sw, ok := writer.(*StreamWriter); ok {
+			streamWriter, writer = sw, sw.writer
+		}
+		hijacker, ok := writer.(http.Hijacker)
+		if !ok {
+			hijackLogger.Error().Msg("Failed to hijack connection")
+			clear(c.writer.Header())
+			c.writer.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		conn, readWriter, err := hijacker.Hijack()
+		if err != nil {
+			hijackLogger.Error().Err(err).Msg("Failed to hijack connection")
+			clear(c.writer.Header())
+			c.writer.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		if streamWriter != nil {
+			streamWriter.hijacked = true
+		}
+		c.clear()
+		defer conn.Close()
+		if err := body(conn, readWriter); err != nil {
+			hijackLogger.Error().Err(err).Msg("Failed to handle hijacked connection")
+		}
+		return
 	case marshallerIsJson:
 		data, err := json.Marshal(c.body)
 		if err != nil {
@@ -172,6 +205,7 @@ func (c *Context) writeResponse(requestCtx context.Context) {
 			if !ok {
 				streamWriter = &StreamWriter{writer: c.writer}
 			}
+			c.clear()
 			if err := body(streamWriter); err != nil {
 				logger.Error().Err(err).Msg("Failed to write response body")
 				break
